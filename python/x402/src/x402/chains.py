@@ -1,8 +1,5 @@
 NETWORK_TO_ID = {
-    "base-sepolia": "84532",
-    "base": "8453",
-    "avalanche-fuji": "43113",
-    "avalanche": "43114",
+    "og-devnet": "10744",
 }
 
 
@@ -21,38 +18,11 @@ def get_chain_id(network: str) -> str:
 
 
 KNOWN_TOKENS = {
-    "84532": [
+    "10744": [
         {
-            "human_name": "usdc",
-            "address": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-            "name": "USDC",
-            "decimals": 6,
-            "version": "2",
-        }
-    ],
-    "8453": [
-        {
-            "human_name": "usdc",
-            "address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-            "name": "USD Coin",  # needs to be exactly what is returned by name() on contract
-            "decimals": 6,
-            "version": "2",
-        }
-    ],
-    "43113": [
-        {
-            "human_name": "usdc",
-            "address": "0x5425890298aed601595a70AB815c96711a31Bc65",
-            "name": "USD Coin",
-            "decimals": 6,
-            "version": "2",
-        }
-    ],
-    "43114": [
-        {
-            "human_name": "usdc",
-            "address": "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E",
-            "name": "USDC",
+            "human_name": "ousdc",
+            "address": "0x48515A4b24f17cadcD6109a9D85a57ba55a619a6",
+            "name": "OUSDC",
             "decimals": 6,
             "version": "2",
         }

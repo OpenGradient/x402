@@ -88,7 +88,7 @@ def process_price_to_atomic_amount(
 def get_usdc_address(chain_id: int | str) -> str:
     """Get the USDC contract address for a given chain ID"""
     chain_id_str = str(chain_id)  # Convert to string for consistency
-    return get_default_token_address(chain_id_str, "usdc")
+    return get_default_token_address(chain_id_str, "ousdc")
 
 
 def find_matching_payment_requirements(

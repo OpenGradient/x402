@@ -29,16 +29,26 @@ class ResponseWrapper:
         self.start_response = start_response
         self.status_code = None
         self.headers = []
-        self.body = []
+        # New fields to store data temporarily
+        self.status_str = None
+        self.exc_info = None
 
     def __call__(self, status, headers, exc_info=None):
         self.status_code = int(status.split()[0])
         self.headers = headers
-        return self.start_response(status, headers, exc_info)
+        # Store these instead of sending them immediately
+        self.status_str = status
+        self.exc_info = exc_info
+        return lambda x: None
 
     def add_header(self, name, value):
         """Add a header to the response."""
         self.headers.append((name, value))
+
+    def finish(self):
+        """Actually send the headers to the server."""
+        if self.status_str:
+            self.start_response(self.status_str, self.headers, self.exc_info)
 
 
 class PaymentMiddleware:
@@ -301,6 +311,7 @@ class PaymentMiddleware:
                     finally:
                         loop.close()
 
+                response_wrapper.finish()
                 return response
 
         return middleware

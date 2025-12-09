@@ -71,7 +71,7 @@ class ResponseSettleMiddleware:
                 {
                     "from": self.address,
                     "nonce": nonce,
-                    "gas": 2000000,
+                    "gas": 3000000,
                     "gasPrice": self.w3.eth.gas_price,
                 }
             )
@@ -402,7 +402,7 @@ class PaymentMiddleware:
                     finally:
                         loop.close()
 
-                    response_body = b"".join(response)
+                    response_body = b"".join(response_body_chunks)
                     output_hash = hashlib.sha256(response_body).hexdigest()
 
                     try:
@@ -420,7 +420,14 @@ class PaymentMiddleware:
                                 "0x" + settle_response.get("tx_hash"),
                             )
                         else:
+                            # TODO: will be replaced by buffer settlement
                             print(f"Settlement failed: {settle_response.get('error')}")
+
+                    except Exception as e:
+                        # Output Settlement error - discard buffered response and return 402
+                        return x402_response(
+                            "Output settlement failed: " + (str(e) or "Unknown error")
+                        )
                     finally:
                         loop.close()
 

@@ -402,34 +402,35 @@ class PaymentMiddleware:
                     finally:
                         loop.close()
 
-                    response_body = b"".join(response_body_chunks)
-                    output_hash = hashlib.sha256(response_body).hexdigest()
+                    # TODO: replace with batching
+                    # response_body = b"".join(response_body_chunks)
+                    # output_hash = hashlib.sha256(response_body).hexdigest()
 
-                    try:
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        settle_response = loop.run_until_complete(
-                            self.response_settle_middleware.settle(
-                                "0x" + input_hash, "0x" + output_hash
-                            )
-                        )
+                    # try:
+                    #     loop = asyncio.new_event_loop()
+                    #     asyncio.set_event_loop(loop)
+                    #     settle_response = loop.run_until_complete(
+                    #         self.response_settle_middleware.settle(
+                    #             "0x" + input_hash, "0x" + output_hash
+                    #         )
+                    #     )
 
-                        if settle_response.get("success"):
-                            response_wrapper.add_header(
-                                "X-PROCESSING-HASH",
-                                "0x" + settle_response.get("tx_hash"),
-                            )
-                        else:
-                            # TODO: will be replaced by buffer settlement
-                            print(f"Settlement failed: {settle_response.get('error')}")
+                    #     if settle_response.get("success"):
+                    #         response_wrapper.add_header(
+                    #             "X-PROCESSING-HASH",
+                    #             "0x" + settle_response.get("tx_hash"),
+                    #         )
+                    #     else:
+                    #         # TODO: will be replaced by buffer settlement
+                    #         print(f"Settlement failed: {settle_response.get('error')}")
 
-                    except Exception as e:
-                        # Output Settlement error - discard buffered response and return 402
-                        return x402_response(
-                            "Output settlement failed: " + (str(e) or "Unknown error")
-                        )
-                    finally:
-                        loop.close()
+                    # except Exception as e:
+                    #     # Output Settlement error - discard buffered response and return 402
+                    #     return x402_response(
+                    #         "Output settlement failed: " + (str(e) or "Unknown error")
+                    #     )
+                    # finally:
+                    #     loop.close()
 
                 # Send the buffered response
                 response_wrapper.send_response(response_body_chunks)

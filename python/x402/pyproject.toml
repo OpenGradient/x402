@@ -1,6 +1,6 @@
 [project]
 name = "og-test-x402"
-version = "0.0.3"
+version = "0.0.4"
 description = "x402: An internet native payments protocol"
 readme = "README.md"
 license = { text = "Apache-2.0" }

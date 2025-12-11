@@ -12,6 +12,7 @@ from x402.types import (
     SupportedNetworks,
     HTTPInputSchema,
 )
+import threading
 import hashlib
 from x402.common import (
     process_price_to_atomic_amount,
@@ -81,10 +82,6 @@ class ResponseSettleMiddleware:
             )
 
             tx_hash = self.w3.eth.send_raw_transaction(signed_txn.raw_transaction)
-            receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
-
-            if receipt.status != 1:
-                return {"success": False, "error": "Transaction failed"}
 
             return {"success": True, "tx_hash": tx_hash.hex()}
 
@@ -370,67 +367,41 @@ class PaymentMiddleware:
                     and response_wrapper.status_code >= 200
                     and response_wrapper.status_code < 300
                 ):
-                    # Settle the payment for successful responses
-                    try:
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        settle_response = loop.run_until_complete(
+                    threading.Thread(
+                        target=lambda: asyncio.run(
                             facilitator.settle(payment, selected_payment_requirements)
                         )
+                    ).start()
 
-                        if settle_response.success:
-                            # Add settlement response header
-                            settlement_header = base64.b64encode(
-                                settle_response.model_dump_json(by_alias=True).encode(
-                                    "utf-8"
-                                )
-                            ).decode("utf-8")
-                            response_wrapper.add_header(
-                                "X-PAYMENT-RESPONSE", settlement_header
-                            )
-                        else:
-                            # Settlement failed - discard buffered response and return 402
-                            return x402_response(
-                                "Settle failed: "
-                                + (settle_response.error_reason or "Unknown error")
-                            )
-                    except Exception as e:
-                        # Settlement error - discard buffered response and return 402
-                        return x402_response(
-                            "Settle failed: " + (str(e) or "Unknown error")
+                # TODO: replace with batching
+                response_body = b"".join(response_body_chunks)
+                output_hash = hashlib.sha256(response_body).hexdigest()
+
+                try:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    settle_response = loop.run_until_complete(
+                        self.response_settle_middleware.settle(
+                            "0x" + input_hash, "0x" + output_hash
                         )
-                    finally:
-                        loop.close()
+                    )
 
-                    # TODO: replace with batching
-                    # response_body = b"".join(response_body_chunks)
-                    # output_hash = hashlib.sha256(response_body).hexdigest()
+                    if settle_response.get("success"):
+                        response_wrapper.add_header(
+                            "X-PROCESSING-HASH",
+                            "0x" + settle_response.get("tx_hash"),
+                        )
+                    else:
+                        # TODO: will be replaced by buffer settlement
+                        print(f"Settlement failed: {settle_response.get('error')}")
 
-                    # try:
-                    #     loop = asyncio.new_event_loop()
-                    #     asyncio.set_event_loop(loop)
-                    #     settle_response = loop.run_until_complete(
-                    #         self.response_settle_middleware.settle(
-                    #             "0x" + input_hash, "0x" + output_hash
-                    #         )
-                    #     )
-
-                    #     if settle_response.get("success"):
-                    #         response_wrapper.add_header(
-                    #             "X-PROCESSING-HASH",
-                    #             "0x" + settle_response.get("tx_hash"),
-                    #         )
-                    #     else:
-                    #         # TODO: will be replaced by buffer settlement
-                    #         print(f"Settlement failed: {settle_response.get('error')}")
-
-                    # except Exception as e:
-                    #     # Output Settlement error - discard buffered response and return 402
-                    #     return x402_response(
-                    #         "Output settlement failed: " + (str(e) or "Unknown error")
-                    #     )
-                    # finally:
-                    #     loop.close()
+                except Exception as e:
+                    # Output Settlement error - discard buffered response and return 402
+                    return x402_response(
+                        "Output settlement failed: " + (str(e) or "Unknown error")
+                    )
+                finally:
+                    loop.close()
 
                 # Send the buffered response
                 response_wrapper.send_response(response_body_chunks)

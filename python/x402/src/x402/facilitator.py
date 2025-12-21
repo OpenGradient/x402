@@ -68,9 +68,12 @@ class FacilitatorClient:
             return VerifyResponse(**data)
 
     async def settle(
-        self, payment: PaymentPayload, payment_requirements: PaymentRequirements
+        self, payment: PaymentPayload, payment_requirements: PaymentRequirements, input_hash: str, output_hash: str, settlement_type: Optional[str] = "settle-batch"
     ) -> SettleResponse:
         headers = {"Content-Type": "application/json"}
+        headers["x-input-hash"] = input_hash
+        headers["x-output-hash"] = output_hash
+        headers["x-settlement-type"] = settlement_type
 
         if self.config.get("create_headers"):
             custom_headers = await self.config["create_headers"]()

@@ -27,68 +27,6 @@ from web3 import Web3
 from eth_account import Account
 from io import BytesIO
 
-
-class ResponseSettleMiddleware:
-    """Middleware to settle the payment after the response is sent."""
-
-    def __init__(self):
-        self.url = os.getenv("ETH_RPC_URL", "https://eth-devnet.opengradient.ai")
-        self.private_key = os.getenv("ETH_PRIVATE_KEY")
-        self.contract_address = os.getenv(
-            "ETH_CONTRACT_ADDRESS", "0x9Ce828377ed2F94093eB9D6d606Fa8f47fA89A3d"
-        )
-        eth_address = os.getenv("ETH_ADDRESS")
-        self.address = Web3.to_checksum_address(eth_address) if eth_address else None
-        self.w3 = Web3(Web3.HTTPProvider(self.url))
-
-        self.contract_abi = [
-            {
-                "inputs": [
-                    {"name": "hash1", "type": "bytes32"},
-                    {"name": "hash2", "type": "bytes32"},
-                ],
-                "name": "settleoutout",
-                "outputs": [],
-                "stateMutability": "nonpayable",
-                "type": "function",
-            }
-        ]
-
-        self.contract = self.w3.eth.contract(
-            address=Web3.to_checksum_address(self.contract_address),
-            abi=self.contract_abi,
-        )
-
-    async def settle(self, input_hash: str, output_hash: str):
-        """Send transaction to settle payment on-chain."""
-        try:
-            hash1 = input_hash
-            hash2 = output_hash
-
-            nonce = self.w3.eth.get_transaction_count(self.address)
-            transaction = self.contract.functions.settleoutout(
-                hash1, hash2
-            ).build_transaction(
-                {
-                    "from": self.address,
-                    "nonce": nonce,
-                    "gas": 3000000,
-                    "gasPrice": self.w3.eth.gas_price,
-                }
-            )
-
-            signed_txn = self.w3.eth.account.sign_transaction(
-                transaction, private_key=self.private_key
-            )
-
-            tx_hash = self.w3.eth.send_raw_transaction(signed_txn.raw_transaction)
-
-            return {"success": True, "tx_hash": tx_hash.hex()}
-
-        except Exception as e:
-            return {"success": False, "error": str(e), "tx_hash": None}
-
-
 class ResponseWrapper:
     """Wrapper to capture and buffer response for settlement logic."""
 
@@ -197,7 +135,6 @@ class PaymentMiddleware:
             "custom_paywall_html": custom_paywall_html,
         }
         self.middleware_configs.append(config)
-        self.response_settle_middleware = ResponseSettleMiddleware()
 
         # Apply the middleware to the app
         self._apply_middleware()

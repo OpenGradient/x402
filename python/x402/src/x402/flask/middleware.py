@@ -302,6 +302,15 @@ class PaymentMiddleware:
                 # Check if response is successful (2xx status code)
                 response_body = b"".join(response_body_chunks)
                 output_hash = hashlib.sha256(response_body).hexdigest()
+                settlement_type = headers.get("x-settlement-type", "settle-batch")
+                
+                model_name = ""
+                if settlement_type == "settle-metadata":
+                    try:
+                        request_body = json.loads(body_bytes.decode('utf-8'))
+                        model_name = request_body.get("model", "")
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        model_name = ""                    
                 
                 if (
                     response_wrapper.status_code is not None
@@ -310,7 +319,7 @@ class PaymentMiddleware:
                 ):
                     threading.Thread(
                         target=lambda: asyncio.run(
-                            facilitator.settle(payment, selected_payment_requirements, "0x" + input_hash, "0x" + output_hash, headers.get("x-settlement-type", "settle-batch"))
+                            facilitator.settle(payment, selected_payment_requirements, "0x" + input_hash, "0x" + output_hash, settlement_type, model_name)
                         )
                     ).start()
 

@@ -2,9 +2,9 @@ from typing import Literal
 
 
 SupportedNetworks = Literal[
-    "base", "base-sepolia", "avalanche-fuji", "avalanche", "og-devnet"
+    "base", "base-sepolia", "avalanche-fuji", "avalanche", "og-evm"
 ]
 
 EVM_NETWORK_TO_CHAIN_ID = {
-    "og-devnet": 10744,
+    "og-evm": 262144,
 }

@@ -6,5 +6,5 @@ SupportedNetworks = Literal[
 ]
 
 EVM_NETWORK_TO_CHAIN_ID = {
-    "og-evm": 262144,
+    "og-evm": 10740,
 }

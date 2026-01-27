@@ -1,5 +1,5 @@
 NETWORK_TO_ID = {
-    "og-evm": "262144",
+    "og-evm": "10740",
 }
 
 
@@ -18,7 +18,7 @@ def get_chain_id(network: str) -> str:
 
 
 KNOWN_TOKENS = {
-    "262144": [
+    "10740": [
         {
             "human_name": "ousdc",
             "address": "0x094E464A23B90A71a0894D5D1e5D470FfDD074e1",

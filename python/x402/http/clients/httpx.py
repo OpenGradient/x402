@@ -51,10 +51,16 @@ class x402AsyncTransport(AsyncBaseTransport):
     Wraps another transport to intercept 402 responses, create payment
     payloads, and retry with payment headers automatically.
 
+    For the upto scheme, this transport also:
+    - Captures the X-Upto-Session header from responses
+    - Attaches it on subsequent requests to the same host+path
+    - Handles session expiry (402 after an active session)
+
     Unlike event hooks, transports can control the response returned.
     """
 
     RETRY_KEY = "_x402_is_retry"
+    SESSION_HEADER = "X-Upto-Session"
 
     def __init__(
         self,
@@ -76,8 +82,41 @@ class x402AsyncTransport(AsyncBaseTransport):
         self._client = client
         self._transport = transport or httpx.AsyncHTTPTransport()
 
+        # Session store: maps "host:path" -> session_id
+        self._sessions: dict[str, str] = {}
+        self._session_lock = __import__("threading").Lock()
+
+    def _session_key(self, request: Request) -> str:
+        """Build a session key from request host + path."""
+        return f"{request.url.host}:{request.url.raw_path.decode('ascii', errors='ignore')}"
+
+    def _get_session(self, request: Request) -> str | None:
+        """Get stored session ID for this request's endpoint."""
+        key = self._session_key(request)
+        with self._session_lock:
+            return self._sessions.get(key)
+
+    def _store_session(self, request: Request, session_id: str) -> None:
+        """Store a session ID for this request's endpoint."""
+        key = self._session_key(request)
+        with self._session_lock:
+            self._sessions[key] = session_id
+
+    def _clear_session(self, request: Request) -> None:
+        """Clear stored session for this request's endpoint."""
+        key = self._session_key(request)
+        with self._session_lock:
+            self._sessions.pop(key, None)
+
     async def handle_async_request(self, request: Request) -> Response:
-        """Handle request with automatic 402 payment retry.
+        """Handle request with automatic 402 payment retry and session reuse.
+
+        Flow:
+        1. If we have a stored session, attach X-Upto-Session header
+        2. Send request
+        3. If 200-299 with X-Upto-Session in response, store it
+        4. If 402 with active session, clear session and create new payment
+        5. If 402 without session, create payment normally
 
         Args:
             request: The outgoing HTTP request.
@@ -85,12 +124,38 @@ class x402AsyncTransport(AsyncBaseTransport):
         Returns:
             Response (original or retried with payment).
         """
-        # Send the initial request
+        # Check for existing session
+        session_id = self._get_session(request)
+        if session_id and not request.extensions.get(self.RETRY_KEY):
+            # Attach session header to request
+            new_headers = dict(request.headers)
+            new_headers[self.SESSION_HEADER] = session_id
+            request = Request(
+                method=request.method,
+                url=request.url,
+                headers=new_headers,
+                content=request.content,
+                extensions=request.extensions,
+            )
+
+        # Send the request
         response = await self._transport.handle_async_request(request)
+
+        # Capture session from successful responses
+        if 200 <= response.status_code < 300:
+            resp_session = response.headers.get(self.SESSION_HEADER.lower()) or \
+                           response.headers.get(self.SESSION_HEADER)
+            if resp_session:
+                self._store_session(request, resp_session)
+            return response
 
         # Not a 402, return as-is
         if response.status_code != 402:
             return response
+
+        # If we had a session and got 402, the session expired/was settled
+        if session_id:
+            self._clear_session(request)
 
         # Check if already a retry (via request extensions)
         if request.extensions.get(self.RETRY_KEY):
@@ -123,6 +188,9 @@ class x402AsyncTransport(AsyncBaseTransport):
             new_headers.update(payment_headers)
             new_headers["Access-Control-Expose-Headers"] = "PAYMENT-RESPONSE,X-PAYMENT-RESPONSE"
 
+            # Remove stale session header if present
+            new_headers.pop(self.SESSION_HEADER, None)
+
             # Mark as retry in extensions
             new_extensions = dict(request.extensions)
             new_extensions[self.RETRY_KEY] = True
@@ -138,12 +206,21 @@ class x402AsyncTransport(AsyncBaseTransport):
 
             # Retry using same transport
             retry_response = await self._transport.handle_async_request(retry_request)
+
+            # Capture session from the retry response (server creates session on first payment)
+            if 200 <= retry_response.status_code < 300:
+                resp_session = retry_response.headers.get(self.SESSION_HEADER.lower()) or \
+                               retry_response.headers.get(self.SESSION_HEADER)
+                if resp_session:
+                    self._store_session(request, resp_session)
+
             return retry_response
 
         except PaymentError:
             raise
         except Exception as e:
             raise PaymentError(f"Failed to handle payment: {e}") from e
+
 
     async def aclose(self) -> None:
         """Close the underlying transport."""

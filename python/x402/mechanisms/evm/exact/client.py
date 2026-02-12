@@ -1,4 +1,9 @@
-"""EVM client implementation for the Exact payment scheme (V2)."""
+"""EVM client implementation for the Exact payment scheme (V2).
+
+Routes to EIP-3009 or Permit2 based on requirements.extra["assetTransferMethod"].
+Defaults to EIP-3009 for backward compatibility.
+Mirrors Go implementation in go/mechanisms/evm/exact/client/scheme.go.
+"""
 
 from datetime import timedelta
 from typing import Any
@@ -14,10 +19,18 @@ from ..utils import (
     get_asset_info,
     get_evm_chain_id,
 )
+from .permit2 import create_permit2_payload
+
+# Asset transfer method constants (matches Go's AssetTransferMethod type)
+ASSET_TRANSFER_METHOD_EIP3009 = "eip3009"
+ASSET_TRANSFER_METHOD_PERMIT2 = "permit2"
 
 
 class ExactEvmScheme:
     """EVM client implementation for the Exact payment scheme (V2).
+
+    Routes to EIP-3009 or Permit2 based on requirements.extra["assetTransferMethod"].
+    Defaults to EIP-3009 for backward compatibility.
 
     Implements SchemeNetworkClient protocol. Returns the inner payload dict,
     which x402Client wraps into a full PaymentPayload.
@@ -40,7 +53,10 @@ class ExactEvmScheme:
         self,
         requirements: PaymentRequirements,
     ) -> dict[str, Any]:
-        """Create signed EIP-3009 inner payload.
+        """Create signed inner payload.
+
+        Routes to EIP-3009 or Permit2 based on requirements.extra["assetTransferMethod"].
+        Defaults to EIP-3009 for backward compatibility.
 
         Args:
             requirements: Payment requirements from server.
@@ -48,6 +64,31 @@ class ExactEvmScheme:
         Returns:
             Inner payload dict (authorization + signature).
             x402Client wraps this with x402_version, accepted, resource, extensions.
+        """
+        # Check asset transfer method (matches Go scheme.go logic)
+        extra = requirements.extra or {}
+        asset_transfer_method = extra.get(
+            "assetTransferMethod", ASSET_TRANSFER_METHOD_EIP3009
+        )
+
+        # Route based on method
+        if asset_transfer_method == ASSET_TRANSFER_METHOD_PERMIT2:
+            return create_permit2_payload(self._signer, requirements)
+
+        # Default to EIP-3009
+        return self._create_eip3009_payload(requirements)
+
+    def _create_eip3009_payload(
+        self,
+        requirements: PaymentRequirements,
+    ) -> dict[str, Any]:
+        """Create EIP-3009 (transferWithAuthorization) payload.
+
+        Args:
+            requirements: Payment requirements from server.
+
+        Returns:
+            Inner payload dict (authorization + signature).
         """
         nonce = create_nonce()
         valid_after, valid_before = create_validity_window(
@@ -125,3 +166,4 @@ class ExactEvmScheme:
         sig_bytes = self._signer.sign_typed_data(domain, typed_fields, primary_type, message)
 
         return "0x" + sig_bytes.hex()
+

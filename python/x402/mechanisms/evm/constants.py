@@ -2,13 +2,25 @@
 
 from typing import TypedDict
 
-# Scheme identifier
+# Scheme identifiers
 SCHEME_EXACT = "exact"
+SCHEME_UPTO = "upto"
 
 # Default token decimals for USDC
 DEFAULT_DECIMALS = 6
 
-# EIP-3009 function names
+# Asset transfer methods
+ASSET_TRANSFER_METHOD_PERMIT2 = "permit2"
+ASSET_TRANSFER_METHOD_EIP3009 = "eip3009"
+
+# Permit2 Canonical Address
+# TODO: revert after precompile upgrade
+PERMIT2_ADDRESS = "0xA2820a4d4F3A8c5Fa4eaEBF45B093173105a8f8F"
+
+# x402 Permit2 Proxy Addresses (same across all networks)
+X402_EXACT_PERMIT2_PROXY_ADDRESS = "0xdB9F7863C9E06Daf21aD43663a06a2f43d303Fa7"
+X402_UPTO_PERMIT2_PROXY_ADDRESS = "0xdB9F7863C9E06Daf21aD43663a06a2f43d303Fa7"  # Deploy and update
+
 FUNCTION_TRANSFER_WITH_AUTHORIZATION = "transferWithAuthorization"
 FUNCTION_AUTHORIZATION_STATE = "authorizationState"
 
@@ -48,6 +60,20 @@ ERR_FAILED_TO_GET_NETWORK_CONFIG = "invalid_exact_evm_failed_to_get_network_conf
 ERR_FAILED_TO_GET_ASSET_INFO = "invalid_exact_evm_failed_to_get_asset_info"
 ERR_FAILED_TO_VERIFY_SIGNATURE = "invalid_exact_evm_failed_to_verify_signature"
 ERR_TRANSACTION_FAILED = "transaction_failed"
+
+# Upto-specific error codes
+ERR_UPTO_INVALID_SPENDER = "invalid_upto_permit2_spender"
+ERR_UPTO_RECIPIENT_MISMATCH = "invalid_upto_permit2_recipient_mismatch"
+ERR_UPTO_DEADLINE_EXPIRED = "upto_permit2_deadline_expired"
+ERR_UPTO_NOT_YET_VALID = "upto_permit2_not_yet_valid"
+ERR_UPTO_INSUFFICIENT_AMOUNT = "upto_permit2_insufficient_amount"
+ERR_UPTO_TOKEN_MISMATCH = "upto_permit2_token_mismatch"
+ERR_UPTO_INVALID_SIGNATURE = "invalid_upto_permit2_signature"
+ERR_UPTO_ALLOWANCE_REQUIRED = "upto_permit2_allowance_required"
+ERR_UPTO_AMOUNT_EXCEEDS_PERMITTED = "upto_amount_exceeds_permitted"
+ERR_UPTO_SESSION_NOT_FOUND = "upto_session_not_found"
+ERR_UPTO_SESSION_EXPIRED = "upto_session_expired"
+ERR_UPTO_SESSION_CAP_REACHED = "upto_session_cap_reached"
 
 
 class AssetInfo(TypedDict):
@@ -121,6 +147,12 @@ NETWORK_CONFIGS: dict[str, NetworkConfig] = {
                 "version": "2",
                 "decimals": 6,
             },
+            "OPG":{
+                "address": "0x240b09731D96979f50B2C649C9CE10FcF9C7987F",
+                "name": "OPG",
+                "version": "2",
+                "decimals": 18,
+            }
         },
     },
     # Polygon Mainnet
@@ -177,6 +209,23 @@ NETWORK_CONFIGS: dict[str, NetworkConfig] = {
             },
         },
     },
+    "eip155:10740": {
+        "chain_id": 10740,
+        "default_asset": {
+            "address": "0x094E464A23B90A71a0894D5D1e5D470FfDD074e1",
+            "name": "OUSDC",
+            "version": "2",
+            "decimals": 6,
+        },
+        "supported_assets": {
+            "OUSDC": {
+                "address": "0x094E464A23B90A71a0894D5D1e5D470FfDD074e1",
+                "name": "OUSDC",
+                "version": "2",
+                "decimals": 6,
+            },
+        },
+    },
 }
 
 # Network aliases (legacy names to CAIP-2)
@@ -189,6 +238,7 @@ NETWORK_ALIASES: dict[str, str] = {
     "polygon": "eip155:137",
     "avalanche": "eip155:43114",
     "megaeth": "eip155:4326",
+    "og-evm": "eip155:10740",
 }
 
 # V1 supported networks (legacy name-based)
@@ -306,3 +356,23 @@ IS_VALID_SIGNATURE_ABI = [
         "type": "function",
     }
 ]
+
+# Permit2 Witness Types
+PERMIT2_WITNESS_TYPES = {
+    "PermitWitnessTransferFrom": [
+        {"name": "permitted", "type": "TokenPermissions"},
+        {"name": "spender", "type": "address"},
+        {"name": "nonce", "type": "uint256"},
+        {"name": "deadline", "type": "uint256"},
+        {"name": "witness", "type": "Witness"},
+    ],
+    "TokenPermissions": [
+        {"name": "token", "type": "address"},
+        {"name": "amount", "type": "uint256"},
+    ],
+    "Witness": [
+        {"name": "to", "type": "address"},
+        {"name": "validAfter", "type": "uint256"},
+        {"name": "extra", "type": "bytes"},
+    ],
+}

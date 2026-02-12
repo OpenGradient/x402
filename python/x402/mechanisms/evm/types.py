@@ -15,6 +15,90 @@ class ExactEIP3009Authorization:
     valid_before: str  # Unix timestamp as string
     nonce: str  # 32-byte nonce as hex string (0x...)
 
+@dataclass
+class Permit2TokenPermissions:
+    """Permit2 TokenPermissions struct."""
+
+    token: str
+    amount: int
+
+
+@dataclass
+class Permit2Witness:
+    """Permit2 Witness struct for x402."""
+
+    to: str
+    valid_after: int
+    extra: str  # bytes as hex string
+
+
+@dataclass
+class Permit2Authorization:
+    """Permit2 Authorization data."""
+
+    permitted: Permit2TokenPermissions
+    spender: str
+    nonce: int
+    deadline: int
+    witness: Permit2Witness
+    from_address: str  # Not part of the signed message, but needed for payload
+
+
+@dataclass
+class ExactPermit2Payload:
+    """Exact payment payload for Permit2."""
+    
+    permit2_authorization: Permit2Authorization
+    signature: str
+
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "permit2Authorization": {
+                "permitted": {
+                    "token": self.permit2_authorization.permitted.token,
+                    "amount": str(self.permit2_authorization.permitted.amount),
+                },
+                "spender": self.permit2_authorization.spender,
+                "nonce": str(self.permit2_authorization.nonce),
+                "deadline": str(self.permit2_authorization.deadline),
+                "witness": {
+                    "to": self.permit2_authorization.witness.to,
+                    "validAfter": str(self.permit2_authorization.witness.valid_after),
+                    "extra": self.permit2_authorization.witness.extra,
+                },
+                "from": self.permit2_authorization.from_address,
+            },
+            "signature": self.signature,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ExactPermit2Payload":
+        """Create from dictionary."""
+        auth_data = data["permit2Authorization"]
+        permitted_data = auth_data["permitted"]
+        witness_data = auth_data["witness"]
+
+        return cls(
+            permit2_authorization=Permit2Authorization(
+                permitted=Permit2TokenPermissions(
+                    token=permitted_data["token"],
+                    amount=int(permitted_data["amount"]),
+                ),
+                spender=auth_data["spender"],
+                nonce=int(auth_data["nonce"]),
+                deadline=int(auth_data["deadline"]),
+                witness=Permit2Witness(
+                    to=witness_data["to"],
+                    valid_after=int(witness_data["validAfter"]),
+                    extra=witness_data["extra"],
+                ),
+                from_address=auth_data["from"],
+            ),
+            signature=data["signature"],
+        )
+
 
 @dataclass
 class ExactEIP3009Payload:
@@ -77,9 +161,9 @@ class TypedDataDomain:
     """EIP-712 domain separator."""
 
     name: str
-    version: str
     chain_id: int
     verifying_contract: str
+    version: str | None = None
 
 
 @dataclass

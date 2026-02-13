@@ -900,7 +900,7 @@ class PaymentMiddleware:
                     response_wrapper.send_response(body_chunks)
                     return []
 
-              # ---------------------------------------------------------------
+            # ---------------------------------------------------------------
             # Phase 3: Rewind body and dispatch to upstream app (exact scheme)
             # ---------------------------------------------------------------
 

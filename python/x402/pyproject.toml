@@ -49,11 +49,14 @@ svm = [
 # Extensions - optional functionality
 extensions = ["jsonschema>=4.0.0"]
 
+# Session backends
+redis = ["redis>=5.0.0"]
+
 # Convenience bundles
 clients = ["x402[httpx,requests]"]
 servers = ["x402[flask,fastapi]"]
 mechanisms = ["x402[evm,svm]"]
-all = ["x402[httpx,requests,flask,fastapi,evm,svm,extensions]"]
+all = ["x402[httpx,requests,flask,fastapi,evm,svm,extensions,redis]"]
 
 [dependency-groups]
 dev = [
@@ -80,6 +83,9 @@ dev = [
     "solana>=0.36.0",
     # Extensions dependencies
     "jsonschema>=4.0.0",
+    # Redis session backend
+    "redis>=5.0.0",
+    "fakeredis>=2.0.0",
 ]
 
 [project.urls]
@@ -114,6 +120,7 @@ exclude = [
 "facilitator_base.py" = "x402/facilitator_base.py"
 "interfaces.py" = "x402/interfaces.py"
 "session.py" = "x402/session.py"
+"redis_session.py" = "x402/redis_session.py"
 "py.typed" = "x402/py.typed"
 "schemas" = "x402/schemas"
 "http" = "x402/http"

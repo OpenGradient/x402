@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 import threading
 
 if TYPE_CHECKING:
-    from ...session import SessionStore, UptoSession
+    from ...session import SessionStoreProtocol, UptoSession
 
 try:
     from flask import Flask, Request, g, request
@@ -391,7 +391,7 @@ class PaymentMiddleware:
         paywall_config: PaywallConfig | None = None,
         paywall_provider: PaywallProvider | None = None,
         sync_facilitator_on_start: bool = True,
-        session_store: "SessionStore | None" = None,
+        session_store: "SessionStoreProtocol | None" = None,
         cost_per_request: int | None = None,
         session_idle_timeout: int = 300,
     ) -> None:
@@ -942,7 +942,7 @@ def payment_middleware(
     paywall_config: PaywallConfig | None = None,
     paywall_provider: PaywallProvider | None = None,
     sync_facilitator_on_start: bool = True,
-    session_store: "SessionStore | None" = None,
+    session_store: "SessionStoreProtocol | None" = None,
     cost_per_request: int | None = None,
     session_idle_timeout: int = 300,
 ) -> PaymentMiddleware:

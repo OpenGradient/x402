@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 
 @dataclass
@@ -45,6 +45,62 @@ class UptoSession:
     def is_exhausted(self) -> bool:
         """Whether the spend cap has been fully consumed."""
         return self.accumulated_cost >= self.max_amount
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize session to a dict (for Redis/JSON storage)."""
+        return {
+            "session_id": self.session_id,
+            "permit_payload": self.permit_payload,
+            "requirements": self.requirements,
+            "max_amount": self.max_amount,
+            "accumulated_cost": self.accumulated_cost,
+            "created_at": self.created_at,
+            "last_activity": self.last_activity,
+            "settled": self.settled,
+            "settlement_tx": self.settlement_tx,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> UptoSession:
+        """Deserialize session from a dict."""
+        return cls(
+            session_id=data["session_id"],
+            permit_payload=data["permit_payload"],
+            requirements=data["requirements"],
+            max_amount=int(data["max_amount"]),
+            accumulated_cost=int(data["accumulated_cost"]),
+            created_at=float(data["created_at"]),
+            last_activity=float(data["last_activity"]),
+            settled=bool(data.get("settled", False)),
+            settlement_tx=str(data.get("settlement_tx", "")),
+        )
+
+
+@runtime_checkable
+class SessionStoreProtocol(Protocol):
+    """Protocol for session stores (in-memory, Redis, etc.)."""
+
+    def create_session(
+        self,
+        permit_payload: dict[str, Any],
+        requirements: dict[str, Any],
+        max_amount: int,
+    ) -> str: ...
+
+    def get_session(self, session_id: str) -> UptoSession | None: ...
+
+    def add_cost(self, session_id: str, cost: int) -> bool: ...
+
+    def close_session(self, session_id: str) -> UptoSession | None: ...
+
+    def mark_settled(self, session_id: str, tx_hash: str) -> None: ...
+
+    def get_expired_sessions(self, idle_timeout_seconds: int) -> list[UptoSession]: ...
+
+    def get_exhausted_sessions(self) -> list[UptoSession]: ...
+
+    @property
+    def active_count(self) -> int: ...
 
 
 class SessionStore:

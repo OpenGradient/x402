@@ -11,9 +11,10 @@ from x402.types import x402PaymentRequiredResponse
 
 
 class HttpxHooks:
-    def __init__(self, client: x402Client):
+    def __init__(self, client: x402Client, verify=True):
         self.client = client
         self._is_retry = False
+        self._verify = verify
 
     async def on_request(self, request: Request):
         """Handle request before it is sent."""
@@ -59,7 +60,7 @@ class HttpxHooks:
             request.headers["Access-Control-Expose-Headers"] = "X-Payment-Response"
 
             # Retry the request
-            async with AsyncClient() as client:
+            async with AsyncClient(verify=self._verify) as client:
                 retry_response = await client.send(request)
 
                 # Copy the retry response data to the original response
@@ -80,6 +81,7 @@ def x402_payment_hooks(
     account: Account,
     max_value: Optional[int] = None,
     payment_requirements_selector: Optional[PaymentSelectorCallable] = None,
+    verify=True,
 ) -> Dict[str, List]:
     """Create httpx event hooks dictionary for handling 402 Payment Required responses.
 
@@ -101,7 +103,7 @@ def x402_payment_hooks(
     )
 
     # Create hooks
-    hooks = HttpxHooks(client)
+    hooks = HttpxHooks(client, verify=verify)
 
     # Return event hooks dictionary
     return {
@@ -130,7 +132,8 @@ class x402HttpxClient(AsyncClient):
                 and returns a PaymentRequirements object.
             **kwargs: Additional arguments to pass to AsyncClient
         """
+        verify = kwargs.get("verify", True)
         super().__init__(**kwargs)
         self.event_hooks = x402_payment_hooks(
-            account, max_value, payment_requirements_selector
+            account, max_value, payment_requirements_selector, verify=verify
         )

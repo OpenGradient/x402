@@ -3,6 +3,7 @@
 from .client import ExactEvmScheme as ExactEvmClientScheme
 from .facilitator import ExactEvmScheme as ExactEvmFacilitatorScheme
 from .facilitator import ExactEvmSchemeConfig
+from .permit2 import ExactPermit2Scheme
 from .register import (
     register_exact_evm_client,
     register_exact_evm_facilitator,
@@ -11,11 +12,12 @@ from .register import (
 from .server import ExactEvmScheme as ExactEvmServerScheme
 
 # Unified export (context determines which is used)
-ExactEvmScheme = ExactEvmClientScheme  # Most common use case
+ExactEvmScheme = ExactEvmClientScheme  # Most common use case (defaults to EIP-3009)
 
 __all__ = [
     "ExactEvmScheme",
     "ExactEvmClientScheme",
+    "ExactPermit2Scheme",
     "ExactEvmServerScheme",
     "ExactEvmFacilitatorScheme",
     "ExactEvmSchemeConfig",

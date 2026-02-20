@@ -324,7 +324,7 @@ class x402ResourceServerBase:
             asset=asset_amount.asset,
             amount=asset_amount.amount,
             pay_to=config.pay_to,
-            max_timeout_seconds=config.max_timeout_seconds or 300,
+            max_timeout_seconds=config.max_timeout_seconds or 600,
             extra=asset_amount.extra or {},
         )
 

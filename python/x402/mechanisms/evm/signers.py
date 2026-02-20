@@ -110,10 +110,12 @@ class EthAccountSigner:
         if isinstance(domain, TypedDataDomain):
             domain_dict = {
                 "name": domain.name,
-                "version": domain.version,
                 "chainId": domain.chain_id,
                 "verifyingContract": domain.verifying_contract,
             }
+            # Only include version if present (Permit2 omits version from its domain)
+            if domain.version is not None:
+                domain_dict["version"] = domain.version
         else:
             domain_dict = domain
 

@@ -135,11 +135,29 @@ def hash_domain(domain: TypedDataDomain) -> bytes:
     """
     domain_data = {
         "name": domain.name,
-        "version": domain.version,
         "chainId": domain.chain_id,
         "verifyingContract": domain.verifying_contract,
     }
-    return hash_struct("EIP712Domain", DOMAIN_TYPES, domain_data)
+    
+    # Only include version if present
+    if domain.version is not None:
+        domain_data["version"] = domain.version
+        
+    # Dynamically build domain type definition based on present fields
+    # Standard EIP-712 domain always has: name, version, chainId, verifyingContract
+    # But Permit2 omits version.
+    
+    # We use the full definition from DOMAIN_TYPES but filter it based on present keys
+    full_domain_type = DOMAIN_TYPES["EIP712Domain"]
+    actual_domain_type = [
+        field for field in full_domain_type 
+        if field["name"] in domain_data
+    ]
+    
+    # Create a temporary types dict for this specific domain hashing
+    temp_types = {"EIP712Domain": actual_domain_type}
+    
+    return hash_struct("EIP712Domain", temp_types, domain_data)
 
 
 def hash_typed_data(

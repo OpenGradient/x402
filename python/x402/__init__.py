@@ -137,6 +137,8 @@ from .server import (
     x402ResourceServerSync,
 )
 
+from .session import SessionStore, SessionStoreProtocol, UptoSession
+
 __version__ = "0.1.0"
 
 __all__ = [
@@ -221,4 +223,7 @@ __all__ = [
     "find_schemes_by_network",
     "parse_payment_required",
     "parse_payment_payload",
+    "UptoSession",
+    "SessionStore",
+    "SessionStoreProtocol",
 ]

@@ -36,6 +36,7 @@ if not data then return 0 end
 
 local session = cjson.decode(data)
 if session['settled'] then return 0 end
+if session['settling'] then return 0 end
 
 local new_cost = session['accumulated_cost'] + tonumber(ARGV[1])
 if new_cost > session['max_amount'] then return 0 end
@@ -139,6 +140,8 @@ class RedisSessionStore:
         permit_payload: dict[str, Any],
         requirements: dict[str, Any],
         max_amount: int,
+        route_method: str | None = None,
+        route_path: str | None = None,
     ) -> str:
         session_id = str(uuid.uuid4())
         session = UptoSession(
@@ -146,6 +149,8 @@ class RedisSessionStore:
             permit_payload=permit_payload,
             requirements=requirements,
             max_amount=max_amount,
+            route_method=route_method,
+            route_path=route_path,
         )
         key = self._session_key(session_id)
         pipe = self._redis.pipeline()

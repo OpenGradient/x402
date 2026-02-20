@@ -6,6 +6,7 @@ Provides transport wrapper and convenience classes for httpx AsyncClient.
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -20,6 +21,8 @@ except ImportError as e:
 if TYPE_CHECKING:
     from ...client import x402Client, x402ClientConfig
     from ..x402_http_client import x402HTTPClient
+
+logger = logging.getLogger("x402.httpx")
 
 
 class PaymentError(Exception):
@@ -87,26 +90,50 @@ class x402AsyncTransport(AsyncBaseTransport):
         self._session_lock = __import__("threading").Lock()
 
     def _session_key(self, request: Request) -> str:
-        """Build a session key from request host + path."""
-        return f"{request.url.host}:{request.url.raw_path.decode('ascii', errors='ignore')}"
+        """Build a normalized session key from request endpoint.
+
+        Scope to method + scheme + authority + path (without query params)
+        so reusable sessions are not fragmented by benign query variance.
+        """
+        scheme = request.url.scheme or "http"
+        host = request.url.host or ""
+        port = request.url.port
+        authority = host if port is None else f"{host}:{port}"
+        method = request.method.upper()
+        path = request.url.path or "/"
+        if len(path) > 1 and path.endswith("/"):
+            path = path.rstrip("/")
+        return f"{method} {scheme}://{authority}{path}"
 
     def _get_session(self, request: Request) -> str | None:
         """Get stored session ID for this request's endpoint."""
         key = self._session_key(request)
         with self._session_lock:
-            return self._sessions.get(key)
+            session = self._sessions.get(key)
+        logger.debug(
+            "UPTO_CLIENT_SESSION_LOOKUP key=%s found=%s",
+            key,
+            bool(session),
+        )
+        return session
 
     def _store_session(self, request: Request, session_id: str) -> None:
         """Store a session ID for this request's endpoint."""
         key = self._session_key(request)
         with self._session_lock:
             self._sessions[key] = session_id
+        logger.debug(
+            "UPTO_CLIENT_SESSION_STORE key=%s session_id=%s",
+            key,
+            session_id,
+        )
 
     def _clear_session(self, request: Request) -> None:
         """Clear stored session for this request's endpoint."""
         key = self._session_key(request)
         with self._session_lock:
             self._sessions.pop(key, None)
+        logger.debug("UPTO_CLIENT_SESSION_CLEAR key=%s", key)
 
     async def handle_async_request(self, request: Request) -> Response:
         """Handle request with automatic 402 payment retry and session reuse.
@@ -130,6 +157,11 @@ class x402AsyncTransport(AsyncBaseTransport):
             # Attach session header to request
             new_headers = dict(request.headers)
             new_headers[self.SESSION_HEADER] = session_id
+            logger.debug(
+                "UPTO_CLIENT_SESSION_ATTACH key=%s session_id=%s",
+                self._session_key(request),
+                session_id,
+            )
             request = Request(
                 method=request.method,
                 url=request.url,
@@ -147,6 +179,14 @@ class x402AsyncTransport(AsyncBaseTransport):
                            response.headers.get(self.SESSION_HEADER)
             if resp_session:
                 self._store_session(request, resp_session)
+            else:
+                logger.debug(
+                    "UPTO_CLIENT_SESSION_MISS_ON_SUCCESS key=%s status=%s headers_present=%s",
+                    self._session_key(request),
+                    response.status_code,
+                    self.SESSION_HEADER in response.headers
+                    or self.SESSION_HEADER.lower() in response.headers,
+                )
             return response
 
         # Not a 402, return as-is
@@ -213,6 +253,14 @@ class x402AsyncTransport(AsyncBaseTransport):
                                retry_response.headers.get(self.SESSION_HEADER)
                 if resp_session:
                     self._store_session(request, resp_session)
+                else:
+                    logger.debug(
+                        "UPTO_CLIENT_SESSION_MISS_ON_RETRY_SUCCESS key=%s status=%s headers_present=%s",
+                        self._session_key(request),
+                        retry_response.status_code,
+                        self.SESSION_HEADER in retry_response.headers
+                        or self.SESSION_HEADER.lower() in retry_response.headers,
+                    )
 
             return retry_response
 

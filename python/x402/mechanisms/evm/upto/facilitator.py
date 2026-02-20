@@ -385,7 +385,15 @@ class UptoEvmFacilitatorScheme:
         network = str(requirements.network)
 
         # Determine settlement amount
-        settle_amount = actual_amount if actual_amount is not None else auth.permitted.amount
+        if actual_amount is not None:
+            settle_amount = actual_amount
+        else:
+            # Default to requested amount so session settlement can settle consumed value.
+            try:
+                settle_amount = int(requirements.amount)
+            except (TypeError, ValueError):
+                settle_amount = auth.permitted.amount
+
         if settle_amount > auth.permitted.amount:
             return SettleResponse(
                 success=False,

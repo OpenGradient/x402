@@ -35,6 +35,12 @@ class UptoSession:
     """Whether this session has been settled on-chain."""
     settlement_tx: str = ""
     """Transaction hash from settlement, if settled."""
+    settling: bool = False
+    """Whether a settlement attempt is in progress."""
+    route_method: str | None = None
+    """Optional HTTP method this session is bound to."""
+    route_path: str | None = None
+    """Optional HTTP path this session is bound to."""
 
     @property
     def remaining_budget(self) -> int:
@@ -58,6 +64,9 @@ class UptoSession:
             "last_activity": self.last_activity,
             "settled": self.settled,
             "settlement_tx": self.settlement_tx,
+            "settling": self.settling,
+            "route_method": self.route_method,
+            "route_path": self.route_path,
         }
 
     @classmethod
@@ -73,6 +82,9 @@ class UptoSession:
             last_activity=float(data["last_activity"]),
             settled=bool(data.get("settled", False)),
             settlement_tx=str(data.get("settlement_tx", "")),
+            settling=bool(data.get("settling", False)),
+            route_method=data.get("route_method"),
+            route_path=data.get("route_path"),
         )
 
 
@@ -85,6 +97,8 @@ class SessionStoreProtocol(Protocol):
         permit_payload: dict[str, Any],
         requirements: dict[str, Any],
         max_amount: int,
+        route_method: str | None = None,
+        route_path: str | None = None,
     ) -> str: ...
 
     def get_session(self, session_id: str) -> UptoSession | None: ...
@@ -119,6 +133,8 @@ class SessionStore:
         permit_payload: dict[str, Any],
         requirements: dict[str, Any],
         max_amount: int,
+        route_method: str | None = None,
+        route_path: str | None = None,
     ) -> str:
         """Create a new upto session.
 
@@ -136,6 +152,8 @@ class SessionStore:
             permit_payload=permit_payload,
             requirements=requirements,
             max_amount=max_amount,
+            route_method=route_method,
+            route_path=route_path,
         )
         with self._lock:
             self._sessions[session_id] = session
@@ -168,7 +186,7 @@ class SessionStore:
         """
         with self._lock:
             session = self._sessions.get(session_id)
-            if session is None or session.settled:
+            if session is None or session.settled or session.settling:
                 return False
             if session.accumulated_cost + cost > session.max_amount:
                 return False

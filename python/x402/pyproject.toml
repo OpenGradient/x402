@@ -1,6 +1,6 @@
 [project]
 name = "og-test-v2-x402"
-version = "0.0.2"
+version = "0.0.9"
 description = "x402 Payment Protocol SDK for Python"
 readme = "README.md"
 license = { text = "MIT" }
@@ -111,21 +111,21 @@ exclude = [
 [tool.hatch.build.targets.wheel]
 # Force inclusion with package name remapping
 [tool.hatch.build.targets.wheel.force-include]
-"__init__.py" = "x402/__init__.py"
-"client.py" = "x402/client.py"
-"client_base.py" = "x402/client_base.py"
-"server.py" = "x402/server.py"
-"server_base.py" = "x402/server_base.py"
-"facilitator.py" = "x402/facilitator.py"
-"facilitator_base.py" = "x402/facilitator_base.py"
-"interfaces.py" = "x402/interfaces.py"
-"session.py" = "x402/session.py"
-"redis_session.py" = "x402/redis_session.py"
-"py.typed" = "x402/py.typed"
-"schemas" = "x402/schemas"
-"http" = "x402/http"
-"mechanisms" = "x402/mechanisms"
-"extensions" = "x402/extensions"
+"__init__.py" = "x402v2/__init__.py"
+"client.py" = "x402v2/client.py"
+"client_base.py" = "x402v2/client_base.py"
+"server.py" = "x402v2/server.py"
+"server_base.py" = "x402v2/server_base.py"
+"facilitator.py" = "x402v2/facilitator.py"
+"facilitator_base.py" = "x402v2/facilitator_base.py"
+"interfaces.py" = "x402v2/interfaces.py"
+"session.py" = "x402v2/session.py"
+"redis_session.py" = "x402v2/redis_session.py"
+"py.typed" = "x402v2/py.typed"
+"schemas" = "x402v2/schemas"
+"http" = "x402v2/http"
+"mechanisms" = "x402v2/mechanisms"
+"extensions" = "x402v2/extensions"
 
 [tool.ruff]
 line-length = 100

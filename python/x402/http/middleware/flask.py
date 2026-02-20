@@ -9,6 +9,8 @@ from __future__ import annotations
 import io
 import json
 import logging
+import re
+import time
 from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any
 import threading
@@ -20,7 +22,7 @@ try:
     from flask import Flask, Request, g, request
 except ImportError as e:
     raise ImportError(
-        "Flask middleware requires the flask package. Install with: uv add x402[flask]"
+            "Flask middleware requires the flask package. Install with: uv add x402[flask]"
     ) from e
 
 from ..types import (
@@ -210,6 +212,7 @@ class ResponseWrapper:
         self.status: str | None = None
         self.status_code: int | None = None
         self.headers: list[tuple[str, str]] = []
+        self._extra_headers: list[tuple[str, str]] = []
         self._write_chunks: list[bytes] = []
 
     def __call__(
@@ -221,6 +224,8 @@ class ResponseWrapper:
         self.status = status
         self.status_code = int(status.split()[0])
         self.headers = list(headers)
+        if self._extra_headers:
+            self.headers.extend(self._extra_headers)
 
         def buffered_write(data: bytes) -> None:
             if data:
@@ -229,7 +234,10 @@ class ResponseWrapper:
         return buffered_write
 
     def add_header(self, name: str, value: str) -> None:
-        self.headers.append((name, value))
+        pair = (name, value)
+        self._extra_headers.append(pair)
+        if self.status is not None:
+            self.headers.append(pair)
 
     def send_response(self, body_chunks: list[bytes]) -> None:
         write = self._original_start_response(self.status, self.headers)
@@ -249,6 +257,7 @@ class StreamingResponseWrapper:
         self.status: str | None = None
         self.status_code: int | None = None
         self.headers: list[tuple[str, str]] = []
+        self._extra_headers: list[tuple[str, str]] = []
         self._headers_sent = False
         self._write_fn: Callable[[bytes], None] | None = None
 
@@ -261,6 +270,8 @@ class StreamingResponseWrapper:
         self.status = status
         self.status_code = int(status.split()[0])
         self.headers = list(headers)
+        if self._extra_headers:
+            self.headers.extend(self._extra_headers)
 
         def buffered_write(data: bytes) -> None:
             self._ensure_headers_sent()
@@ -270,7 +281,10 @@ class StreamingResponseWrapper:
         return buffered_write
 
     def add_header(self, name: str, value: str) -> None:
-        self.headers.append((name, value))
+        pair = (name, value)
+        self._extra_headers.append(pair)
+        if self.status is not None:
+            self.headers.append(pair)
 
     def _ensure_headers_sent(self) -> None:
         if not self._headers_sent:
@@ -393,7 +407,7 @@ class PaymentMiddleware:
         sync_facilitator_on_start: bool = True,
         session_store: "SessionStoreProtocol | None" = None,
         cost_per_request: int | None = None,
-        session_idle_timeout: int = 300,
+        session_idle_timeout: int = 180,
     ) -> None:
         if _check_if_bazaar_needed(routes):
             _register_bazaar_extension(server)
@@ -403,7 +417,10 @@ class PaymentMiddleware:
         self._paywall_config = paywall_config
         self._sync_on_start = sync_facilitator_on_start
         self._init_done = False
+        self._init_lock = threading.Lock()
         self._original_wsgi = app.wsgi_app
+        self._reaper_started = False
+        self._reaper_lock = threading.Lock()
 
         # Session support for upto scheme
         self._session_store = session_store
@@ -415,9 +432,16 @@ class PaymentMiddleware:
 
         app.wsgi_app = self._wsgi_middleware  # type: ignore
 
-        # Start session reaper if session store is provided
-        if self._session_store:
+    def _ensure_session_reaper_started(self) -> None:
+        """Start session reaper lazily inside worker process."""
+        if not self._session_store or self._reaper_started:
+            return
+
+        with self._reaper_lock:
+            if not self._session_store or self._reaper_started:
+                return
             self._start_session_reaper()
+            self._reaper_started = True
 
     # ------------------------------------------------------------------
     # Session Management
@@ -428,7 +452,6 @@ class PaymentMiddleware:
         def _reaper() -> None:
             while True:
                 try:
-                    import time
                     time.sleep(min(30, self._session_idle_timeout // 2))
 
                     if not self._session_store:
@@ -438,39 +461,122 @@ class PaymentMiddleware:
                     expired = self._session_store.get_expired_sessions(
                         self._session_idle_timeout
                     )
+                    if expired:
+                        logger.info(
+                            "Session reaper queued %d expired session(s) for settlement",
+                            len(expired),
+                        )
                     for session in expired:
-                        self._settle_session(session)
+                        self._settle_session(session, reason="expired")
 
                     # Settle exhausted sessions
                     exhausted = self._session_store.get_exhausted_sessions()
+                    if exhausted:
+                        logger.info(
+                            "Session reaper queued %d exhausted session(s) for settlement",
+                            len(exhausted),
+                        )
                     for session in exhausted:
-                        self._settle_session(session)
+                        self._settle_session(session, reason="exhausted")
 
                 except Exception as e:
                     logger.warning("Session reaper error: %s", e)
 
         t = threading.Thread(target=_reaper, daemon=True, name="x402-session-reaper")
         t.start()
+        logger.info(
+            "Session reaper started (idle_timeout=%ss)",
+            self._session_idle_timeout,
+        )
 
-    def _settle_session(self, session: "UptoSession") -> None:
+    def _ensure_initialized(self) -> bool:
+        """Ensure the HTTP server is initialized (for background settlement).
+
+        Returns True if initialized, False if initialization failed.
+        """
+        if self._init_done:
+            return True
+
+        with self._init_lock:
+            if self._init_done:
+                return True
+            try:
+                self._http_server.initialize()
+                self._init_done = True
+                return True
+            except Exception as e:
+                logger.debug(
+                    "Server not yet initialized, will retry settlement: %s", e
+                )
+                return False
+
+    def _settle_session(self, session: "UptoSession", reason: str = "unknown") -> None:
         """Settle an upto session on-chain with accumulated cost."""
+        logger.info(
+            "Session %s about to settle (reason=%s, accumulated=%d, cap=%d)",
+            session.session_id,
+            reason,
+            session.accumulated_cost,
+            session.max_amount,
+        )
+
         if session.settled or session.accumulated_cost == 0:
             # Nothing to settle — just clean up
             if self._session_store:
                 self._session_store.close_session(session.session_id)
+            logger.info(
+                "Session %s skipped settlement (reason=%s, settled=%s, accumulated=%d)",
+                session.session_id,
+                reason,
+                session.settled,
+                session.accumulated_cost,
+            )
+            return
+
+        # Server must be initialized before we can settle on-chain.
+        # If not ready yet, skip — the reaper will retry next cycle.
+        if not self._ensure_initialized():
+            logger.debug(
+                "Deferring settlement for session %s: server not initialized",
+                session.session_id,
+            )
+            return
+
+        # Freeze session state before settlement to avoid concurrent cost mutations.
+        settle_session = session
+        if self._session_store:
+            latest = self._session_store.close_session(session.session_id)
+            if latest is None:
+                logger.debug("Session %s already closed", session.session_id)
+                return
+            settle_session = latest
+
+        if settle_session.accumulated_cost == 0:
+            logger.info(
+                "Session %s skipped settlement after close (reason=%s, accumulated=%d)",
+                settle_session.session_id,
+                reason,
+                settle_session.accumulated_cost,
+            )
             return
 
         try:
             from ...schemas import PaymentPayload, PaymentRequirements
 
             # Reconstruct from stored dicts
-            payload = PaymentPayload.model_validate(session.permit_payload)
+            payload = PaymentPayload.model_validate(settle_session.permit_payload)
 
             # Override amount to accumulated cost before constructing
-            req_dict = dict(session.requirements)
-            req_dict["amount"] = str(session.accumulated_cost)
+            req_dict = dict(settle_session.requirements)
+            req_dict["amount"] = str(settle_session.accumulated_cost)
             requirements = PaymentRequirements.model_validate(req_dict)
 
+            logger.info(
+                "Session %s settlement attempt started (reason=%s, amount=%d)",
+                settle_session.session_id,
+                reason,
+                settle_session.accumulated_cost,
+            )
             settle_result = self._http_server.process_settlement(
                 payload,
                 requirements,
@@ -479,31 +585,99 @@ class PaymentMiddleware:
             if settle_result.success:
                 logger.info(
                     "Session %s settled: amount=%d, tx=%s",
-                    session.session_id,
-                    session.accumulated_cost,
+                    settle_session.session_id,
+                    settle_session.accumulated_cost,
                     settle_result.transaction,
                 )
-                if self._session_store:
-                    self._session_store.mark_settled(
-                        session.session_id,
-                        settle_result.transaction or "",
-                    )
+            elif self._is_settlement_queued_error(settle_result.error_reason):
+                logger.info(
+                    "Session %s settlement queued (reason=%s, facilitator_status=202)",
+                    settle_session.session_id,
+                    reason,
+                )
             else:
                 logger.warning(
-                    "Session %s settlement failed: %s",
-                    session.session_id,
+                    "Session %s settlement failed (reason=%s): %s",
+                    settle_session.session_id,
+                    reason,
                     settle_result.error_reason,
                 )
         except Exception as e:
             logger.warning(
-                "Session %s settlement error: %s",
-                session.session_id,
+                "Session %s settlement error (reason=%s): %s",
+                settle_session.session_id,
+                reason,
                 e,
             )
-        finally:
-            # Always clean up after settlement attempt
-            if self._session_store:
-                self._session_store.close_session(session.session_id)
+
+    def _get_session_cost(self, requirements: Any) -> int:
+        """Resolve per-request session cost.
+
+        Priority:
+        1. Explicit middleware config (cost_per_request)
+        2. Requirements amount (fallback)
+        """
+        def _parse_positive_int(value: Any) -> int:
+            if value is None:
+                return 0
+            try:
+                return max(0, int(value))
+            except (TypeError, ValueError):
+                try:
+                    from decimal import Decimal, InvalidOperation
+
+                    return max(0, int(Decimal(str(value))))
+                except (InvalidOperation, ValueError, TypeError):
+                    return 0
+
+        if self._cost_per_request is not None:
+            return _parse_positive_int(self._cost_per_request)
+
+        amount: Any = None
+        if hasattr(requirements, "amount"):
+            amount = getattr(requirements, "amount")
+        elif isinstance(requirements, dict):
+            amount = requirements.get("amount")
+
+        return _parse_positive_int(amount)
+
+    @staticmethod
+    def _should_charge_response(status_code: int | None) -> bool:
+        """Charge only when upstream completed successfully."""
+        return status_code is not None and 200 <= status_code < 300
+
+    @staticmethod
+    def _is_settlement_queued_error(error_reason: str | None) -> bool:
+        """Detect facilitator queued settlement (HTTP 202 Accepted)."""
+        if not error_reason:
+            return False
+        reason = error_reason.lower()
+        if "queued" in reason:
+            return True
+        if "settle failed (202)" in reason:
+            return True
+        return bool(re.search(r"\b202\b.*accepted", reason))
+
+    def _route_supports_upto(self, method: str, path: str) -> bool:
+        """Check if the matched route accepts the upto scheme."""
+        get_route_config = getattr(self._http_server, "_get_route_config", None)
+        if not callable(get_route_config):
+            return False
+
+        route_config = get_route_config(path, method)
+        if route_config is None:
+            return False
+
+        accepts = route_config.accepts
+        if not isinstance(accepts, list):
+            accepts = [accepts]
+
+        for option in accepts:
+            scheme = getattr(option, "scheme", "")
+            if scheme == "upto":
+                return True
+
+        return False
 
     def _handle_upto_session_request(
         self,
@@ -522,6 +696,18 @@ class PaymentMiddleware:
                 {"error": "Session store not configured"},
             )
 
+        method = environ.get("REQUEST_METHOD", "GET")
+        path = environ.get("PATH_INFO", "/")
+        if not self._route_supports_upto(method, path):
+            return self._make_error_response(
+                start_response,
+                "402 Payment Required",
+                {
+                    "error": "Session cannot be used for this route",
+                    "code": "upto_session_route_mismatch",
+                },
+            )
+
         session = self._session_store.get_session(session_id)
         if session is None:
             return self._make_error_response(
@@ -537,11 +723,52 @@ class PaymentMiddleware:
                 {"error": "Session already settled", "code": "upto_session_settled"},
             )
 
+        session_scheme = str((session.requirements or {}).get("scheme", ""))
+        if session_scheme != "upto":
+            return self._make_error_response(
+                start_response,
+                "402 Payment Required",
+                {
+                    "error": "Session scheme mismatch",
+                    "code": "upto_session_scheme_mismatch",
+                },
+            )
+
+        # Scope session reuse to the original request method/path.
+        if (
+            session.route_method
+            and session.route_path
+            and (
+                session.route_method.upper() != method.upper()
+                or session.route_path != path
+            )
+        ):
+            return self._make_error_response(
+                start_response,
+                "402 Payment Required",
+                {
+                    "error": "Session bound to different route",
+                    "code": "upto_session_route_mismatch",
+                },
+            )
+
         # Check if session can afford the request
-        cost = self._cost_per_request or 0
-        if cost > 0 and not self._session_store.add_cost(session_id, cost):
-            # Cap reached — settle the session
-            self._settle_session(session)
+        cost = self._get_session_cost(session.requirements)
+        if cost <= 0:
+            logger.warning(
+                "Session %s has non-positive per-request cost; refusing session reuse",
+                session_id,
+            )
+            return self._make_error_response(
+                start_response,
+                "500 Internal Server Error",
+                {
+                    "error": "Invalid session cost configuration",
+                    "code": "upto_invalid_session_cost",
+                },
+            )
+        if cost > session.remaining_budget:
+            self._settle_session(session, reason="cap_reached_precheck")
             return self._make_error_response(
                 start_response,
                 "402 Payment Required",
@@ -562,13 +789,48 @@ class PaymentMiddleware:
         if wsgi_input and hasattr(wsgi_input, "seek"):
             wsgi_input.seek(0)
 
+        def _charge_session_if_needed(status_code: int | None) -> None:
+            if not self._session_store:
+                return
+            if not self._should_charge_response(status_code):
+                logger.info(
+                    "UPTO_SESSION_NOT_CHARGED id=%s method=%s path=%s status=%s",
+                    session_id,
+                    method,
+                    path,
+                    status_code,
+                )
+                return
+            if self._session_store.add_cost(session_id, cost):
+                return
+            logger.warning(
+                "Session %s cost application failed after successful response; likely cap race",
+                session_id,
+            )
+            latest = self._session_store.get_session(session_id)
+            if latest is not None:
+                self._settle_session(latest, reason="cap_reached_post_response")
 
         streaming = _is_streaming(environ, body_bytes)
 
         if streaming:
             streaming_wrapper = StreamingResponseWrapper(start_response)
+            streaming_wrapper.add_header("X-Upto-Session", session_id)
             body_iter = iter(self._original_wsgi(environ, streaming_wrapper))
-            return streaming_wrapper.stream_body(body_iter)
+
+            def _iter() -> Iterator[bytes]:
+                charged = False
+                try:
+                    for chunk in streaming_wrapper.stream_body(body_iter):
+                        if not charged and streaming_wrapper.status_code is not None:
+                            _charge_session_if_needed(streaming_wrapper.status_code)
+                            charged = True
+                        yield chunk
+                finally:
+                    if not charged:
+                        _charge_session_if_needed(streaming_wrapper.status_code)
+
+            return _iter()
         else:
             response_wrapper = ResponseWrapper(start_response)
             body_chunks: list[bytes] = []
@@ -585,6 +847,8 @@ class PaymentMiddleware:
                     "502 Bad Gateway",
                     {"error": "Upstream application error", "details": str(e)},
                 )
+            _charge_session_if_needed(response_wrapper.status_code)
+            response_wrapper.add_header("X-Upto-Session", session_id)
             response_wrapper.send_response(body_chunks)
             return []
 
@@ -685,13 +949,40 @@ class PaymentMiddleware:
         environ: dict[str, Any],
         start_response: Callable[..., Any],
     ) -> Iterator[bytes]:
-        # Fire-and-forget settlement in background thread
-        self._settle_in_background(result.payment_payload, result.payment_requirements)
-
         streaming_wrapper = StreamingResponseWrapper(start_response)
         body_iter = iter(self._original_wsgi(environ, streaming_wrapper))
+        payment_payload = result.payment_payload
+        payment_requirements = result.payment_requirements
 
-        return streaming_wrapper.stream_body(body_iter)
+        def _iter() -> Iterator[bytes]:
+            settled = False
+            try:
+                for chunk in streaming_wrapper.stream_body(body_iter):
+                    if not settled and streaming_wrapper.status_code is not None:
+                        settled = True
+                        if self._should_charge_response(streaming_wrapper.status_code):
+                            self._settle_in_background(
+                                payment_payload, payment_requirements
+                            )
+                        else:
+                            logger.info(
+                                "Skipping settlement for non-success streaming response status=%s",
+                                streaming_wrapper.status_code,
+                            )
+                    yield chunk
+            finally:
+                if not settled:
+                    if self._should_charge_response(streaming_wrapper.status_code):
+                        self._settle_in_background(
+                            payment_payload, payment_requirements
+                        )
+                    else:
+                        logger.info(
+                            "Skipping settlement for non-success streaming response status=%s",
+                            streaming_wrapper.status_code,
+                        )
+
+        return _iter()
 
     # ------------------------------------------------------------------
     # Background settlement
@@ -707,6 +998,10 @@ class PaymentMiddleware:
                 )
                 if settle_result.success:
                     logger.info("Background settlement succeeded")
+                elif self._is_settlement_queued_error(settle_result.error_reason):
+                    logger.info(
+                        "Background settlement queued (facilitator_status=202)",
+                    )
                 else:
                     logger.warning(
                         "Background settlement failed: %s",
@@ -727,14 +1022,28 @@ class PaymentMiddleware:
         environ: dict[str, Any],
         start_response: Callable[..., Any],
     ) -> Iterator[bytes]:
+        # Important for Gunicorn preload/fork safety:
+        # start background threads only after worker boot.
+        self._ensure_session_reaper_started()
+
+        info = _parse_environ(environ)
+
         # ---------------------------------------------------------------
         # Phase 0: Check for upto session header
         # ---------------------------------------------------------------
         session_header = environ.get("HTTP_X_UPTO_SESSION")
         if session_header and self._session_store:
-            return self._handle_upto_session_request(
-                session_header, environ, start_response
+            # Do not allow session headers to short-circuit non-protected routes.
+            probe_context = HTTPRequestContext(
+                adapter=_EnvironAdapter(environ, b""),
+                path=info["path"],
+                method=info["method"],
+                payment_header=info["payment_header"],
             )
+            if self._http_server.requires_payment(probe_context):
+                return self._handle_upto_session_request(
+                    session_header, environ, start_response
+                )
 
         # ---------------------------------------------------------------
         # Phase 1: Lightweight check using raw environ (NO Flask context)
@@ -745,7 +1054,6 @@ class PaymentMiddleware:
 
         # Build a lightweight adapter from environ directly
         adapter = _EnvironAdapter(environ, body_bytes)
-        info = _parse_environ(environ)
 
         context = HTTPRequestContext(
             adapter=adapter,
@@ -845,22 +1153,83 @@ class PaymentMiddleware:
                 permit2_auth = inner_payload.get("permit2Authorization", inner_payload.get("permit2_authorization", {})) or {}
                 permitted = permit2_auth.get("permitted", {}) or {}
                 max_amount = int(permitted.get("amount", 0))
+                deadline = permit2_auth.get("deadline")
+
+                if max_amount <= 0:
+                    return self._make_error_response(
+                        start_response,
+                        "402 Payment Required",
+                        {
+                            "error": "Invalid upto permit amount",
+                            "code": "upto_invalid_permit_amount",
+                        },
+                    )
 
                 session_id = self._session_store.create_session(
                     permit_payload=payload_data,
                     requirements=req_data,
                     max_amount=max_amount,
+                    route_method=info["method"],
+                    route_path=info["path"],
                 )
 
+                cost = self._get_session_cost(req_data)
                 logger.info(
-                    "Created upto session %s with cap %d",
-                    session_id, max_amount,
+                    "UPTO_SESSION_CREATED id=%s method=%s path=%s cap=%d initial_cost=%d deadline=%s",
+                    session_id,
+                    info["method"],
+                    info["path"],
+                    max_amount,
+                    cost,
+                    deadline,
                 )
 
-                # Add initial cost
-                cost = self._cost_per_request or 0
-                if cost > 0:
-                    self._session_store.add_cost(session_id, cost)
+                if cost <= 0:
+                    logger.warning(
+                        "Refusing upto session creation with non-positive per-request cost"
+                    )
+                    self._session_store.close_session(session_id)
+                    return self._make_error_response(
+                        start_response,
+                        "500 Internal Server Error",
+                        {
+                            "error": "Invalid session cost configuration",
+                            "code": "upto_invalid_session_cost",
+                        },
+                    )
+                if cost > max_amount:
+                    self._session_store.close_session(session_id)
+                    return self._make_error_response(
+                        start_response,
+                        "402 Payment Required",
+                        {
+                            "error": "Session spend cap reached, please create new payment",
+                            "code": "upto_session_cap_reached",
+                        },
+                    )
+
+                def _charge_initial_cost_if_needed(status_code: int | None) -> bool:
+                    if not self._session_store:
+                        return False
+                    if not self._should_charge_response(status_code):
+                        logger.info(
+                            "UPTO_SESSION_NOT_CHARGED id=%s method=%s path=%s status=%s",
+                            session_id,
+                            info["method"],
+                            info["path"],
+                            status_code,
+                        )
+                        return False
+                    if self._session_store.add_cost(session_id, cost):
+                        return True
+                    logger.warning(
+                        "Session %s initial cost application failed after successful response",
+                        session_id,
+                    )
+                    current = self._session_store.get_session(session_id)
+                    if current is not None:
+                        self._settle_session(current, reason="initial_cost_post_response")
+                    return False
 
                 # Forward to upstream with session header
                 environ["x402.upto_session_id"] = session_id
@@ -879,7 +1248,24 @@ class PaymentMiddleware:
                     streaming_wrapper = StreamingResponseWrapper(start_response)
                     streaming_wrapper.add_header("X-Upto-Session", session_id)
                     body_iter = iter(self._original_wsgi(environ, streaming_wrapper))
-                    return streaming_wrapper.stream_body(body_iter)
+
+                    def _iter() -> Iterator[bytes]:
+                        charged = False
+                        try:
+                            for chunk in streaming_wrapper.stream_body(body_iter):
+                                if not charged and streaming_wrapper.status_code is not None:
+                                    _charge_initial_cost_if_needed(
+                                        streaming_wrapper.status_code
+                                    )
+                                    charged = True
+                                yield chunk
+                        finally:
+                            if not charged:
+                                _charge_initial_cost_if_needed(
+                                    streaming_wrapper.status_code
+                                )
+
+                    return _iter()
                 else:
                     response_wrapper = ResponseWrapper(start_response)
                     body_chunks: list[bytes] = []
@@ -896,6 +1282,7 @@ class PaymentMiddleware:
                             "502 Bad Gateway",
                             {"error": "Upstream application error", "details": str(e)},
                         )
+                    _charge_initial_cost_if_needed(response_wrapper.status_code)
                     response_wrapper.add_header("X-Upto-Session", session_id)
                     response_wrapper.send_response(body_chunks)
                     return []

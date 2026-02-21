@@ -6,11 +6,14 @@ Uses x402HTTPResourceServerSync for synchronous request processing without async
 
 from __future__ import annotations
 
+import base64
 import io
 import json
+import hashlib
 import logging
 import re
 import time
+from datetime import datetime, timezone
 from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any
 import threading
@@ -133,12 +136,14 @@ def _parse_environ(environ: dict[str, Any]) -> dict[str, str]:
         environ.get("HTTP_PAYMENT_SIGNATURE")
         or environ.get("HTTP_X_PAYMENT")
     )
+    settlement_type = environ.get("HTTP_X_SETTLEMENT_TYPE", "")
 
     return {
         "method": method,
         "path": path,
         "accept": accept,
         "payment_header": payment_header,
+        "settlement_type": settlement_type,
     }
 
 
@@ -197,6 +202,210 @@ def _is_streaming(environ: dict[str, Any], body_bytes: bytes) -> bool:
     if "text/event-stream" in accept:
         return True
     return _is_streaming_from_body(body_bytes)
+
+
+def _normalize_lookup_key(value: str) -> str:
+    return re.sub(r"[\s_-]+", "", value).lower()
+
+
+def _normalize_settlement_type(raw_value: str | None) -> str | None:
+    """Normalize client-provided x-settlement-type header."""
+    if not raw_value:
+        return None
+    normalized = _normalize_lookup_key(raw_value)
+    if normalized in {"private", "pivate"}:
+        return "private"
+    if normalized == "batch":
+        return "batch"
+    if normalized in {"individual", "inidvidual"}:
+        return "individual"
+    return None
+
+
+def _find_first_by_normalized_key(obj: Any, normalized_keys: set[str]) -> Any | None:
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            if isinstance(key, str) and _normalize_lookup_key(key) in normalized_keys:
+                if value is not None:
+                    return value
+        for value in obj.values():
+            found = _find_first_by_normalized_key(value, normalized_keys)
+            if found is not None:
+                return found
+    elif isinstance(obj, list):
+        for item in obj:
+            found = _find_first_by_normalized_key(item, normalized_keys)
+            if found is not None:
+                return found
+    return None
+
+
+def _bytes_to_text(data: bytes) -> str:
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode("utf-8", errors="replace")
+
+
+def _parse_json_bytes(data: bytes) -> Any | None:
+    if not data:
+        return None
+    try:
+        return json.loads(data)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+
+def _extract_sse_json_events(text: str) -> list[Any]:
+    events: list[Any] = []
+    for line in text.splitlines():
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if not payload or payload == "[DONE]":
+            continue
+        try:
+            events.append(json.loads(payload))
+        except json.JSONDecodeError:
+            continue
+    return events
+
+
+def _extract_tee_fields(output_obj: Any, fallback_text: str | None = None) -> tuple[str | None, str | None]:
+    signature_keys = {"teesignature", "teesingature"}
+    tee_id_keys = {"teeid"}
+
+    signature_value = _find_first_by_normalized_key(output_obj, signature_keys)
+    tee_id_value = _find_first_by_normalized_key(output_obj, tee_id_keys)
+
+    tee_signature = str(signature_value) if signature_value else None
+    tee_id = str(tee_id_value) if tee_id_value else None
+
+    if fallback_text:
+        if not tee_signature:
+            sig_match = re.search(
+                r'"tee(?:[_\s-]?signature|[_\s-]?singature)"\s*:\s*"([^"]+)"',
+                fallback_text,
+                re.IGNORECASE,
+            )
+            if sig_match:
+                tee_signature = sig_match.group(1)
+        if not tee_id:
+            tee_id_match = re.search(
+                r'"tee[_\s-]?id"\s*:\s*"([^"]+)"',
+                fallback_text,
+                re.IGNORECASE,
+            )
+            if tee_id_match:
+                tee_id = tee_id_match.group(1)
+
+    return tee_signature, tee_id
+
+
+def _to_unix_uint256_timestamp(value: Any) -> int | None:
+    """Convert common timestamp formats into unix epoch seconds."""
+    if value is None or isinstance(value, bool):
+        return None
+
+    if isinstance(value, (int, float)):
+        ts = int(value)
+        return ts if ts >= 0 else None
+
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+
+        if re.fullmatch(r"\d+", raw):
+            ts = int(raw)
+            return ts if ts >= 0 else None
+
+        iso_value = raw.replace("Z", "+00:00")
+        try:
+            dt = datetime.fromisoformat(iso_value)
+        except ValueError:
+            return None
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+
+        ts = int(dt.timestamp())
+        return ts if ts >= 0 else None
+
+    return None
+
+
+def _extract_tee_timestamp(output_obj: Any, fallback_text: str | None = None) -> int | None:
+    timestamp_keys = {"teetimestamp"}
+    timestamp_value = _find_first_by_normalized_key(output_obj, timestamp_keys)
+    tee_timestamp = _to_unix_uint256_timestamp(timestamp_value)
+
+    if fallback_text and not tee_timestamp:
+        timestamp_match = re.search(
+            r'"tee[_\s-]?timestamp"\s*:\s*("([^"]+)"|([0-9]+))',
+            fallback_text,
+            re.IGNORECASE,
+        )
+        if timestamp_match:
+            raw_timestamp = timestamp_match.group(2) or timestamp_match.group(3)
+            tee_timestamp = _to_unix_uint256_timestamp(raw_timestamp)
+
+    return tee_timestamp
+
+
+def _sha256_bytes32(data: bytes) -> str:
+    return "0x" + hashlib.sha256(data).hexdigest()
+
+
+def _is_hex_bytes32(value: str) -> bool:
+    normalized = value if value.startswith("0x") else f"0x{value}"
+    return bool(re.fullmatch(r"0x[0-9a-fA-F]{64}", normalized))
+
+
+def _normalize_bytes32(value: str) -> str:
+    return value if value.startswith("0x") else f"0x{value}"
+
+
+def _extract_eth_address_from_payment_payload(payment_payload: Any) -> str | None:
+    payload_dict: dict[str, Any] | None = None
+    if hasattr(payment_payload, "model_dump"):
+        payload_dict = payment_payload.model_dump(by_alias=True, exclude_none=True)
+    elif isinstance(payment_payload, dict):
+        payload_dict = payment_payload
+
+    if not payload_dict:
+        return None
+
+    inner = payload_dict.get("payload", {}) or {}
+    if not isinstance(inner, dict):
+        return None
+
+    authorization = inner.get("authorization")
+    if isinstance(authorization, dict):
+        from_addr = authorization.get("from")
+        if isinstance(from_addr, str) and from_addr:
+            return from_addr
+
+    permit2_auth = inner.get("permit2Authorization", inner.get("permit2_authorization"))
+    if isinstance(permit2_auth, dict):
+        spender = permit2_auth.get("spender")
+        if isinstance(spender, str) and spender:
+            return spender
+
+    return None
+
+
+def _to_serializable_body(value: Any) -> Any:
+    try:
+        json.dumps(value)
+        return value
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _encode_settlement_data(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(payload, separators=(",", ":"), default=str).encode("utf-8")
+    return base64.b64encode(encoded).decode("ascii")
 
 
 # ============================================================================
@@ -658,6 +867,80 @@ class PaymentMiddleware:
             return True
         return bool(re.search(r"\b202\b.*accepted", reason))
 
+    def _build_settlement_metadata(
+        self,
+        *,
+        request_body_bytes: bytes,
+        response_body_bytes: bytes,
+        payment_payload: Any,
+        requested_settlement_type: str | None = None,
+        output_object: Any | None = None,
+        tee_signature: str | None = None,
+        tee_id: str | None = None,
+        input_hash: str | None = None,
+        output_hash: str | None = None,
+    ) -> tuple[str, str | None]:
+        """Build settlement metadata headers for /settle_data."""
+        if requested_settlement_type == "private":
+            return "private", None
+
+        computed_input_hash = input_hash or _sha256_bytes32(request_body_bytes)
+        computed_output_hash = output_hash or _sha256_bytes32(response_body_bytes)
+
+        request_object = _parse_json_bytes(request_body_bytes)
+        if request_object is None:
+            request_object = _bytes_to_text(request_body_bytes)
+
+        if output_object is None:
+            output_object = _parse_json_bytes(response_body_bytes)
+            if output_object is None:
+                output_object = _bytes_to_text(response_body_bytes)
+
+        fallback_text = _bytes_to_text(response_body_bytes)
+        extracted_signature, extracted_tee_id = _extract_tee_fields(output_object, fallback_text)
+        extracted_tee_timestamp = _extract_tee_timestamp(output_object, fallback_text)
+        tee_signature = tee_signature or extracted_signature
+        tee_id = tee_id or extracted_tee_id or "0xddc21f2d5d0af861b4fc1390df47f1c93bc5aee54e7e31763e97256d56148253"
+        tee_timestamp = extracted_tee_timestamp
+
+        if not tee_signature:
+            # No trustworthy TEE signature on output; mark as private/no-op data settlement.
+            return "private", None
+
+        batch_payload = {
+            "input_hash": computed_input_hash,
+            "output_hash": computed_output_hash,
+            "tee_signature": tee_signature,
+        }
+
+        eth_address = _extract_eth_address_from_payment_payload(payment_payload)
+        can_build_individual = bool(
+            tee_id and _is_hex_bytes32(tee_id) and eth_address and tee_timestamp
+        )
+
+        if requested_settlement_type == "batch":
+            return "batch", _encode_settlement_data(batch_payload)
+
+        if requested_settlement_type == "individual":
+            if not can_build_individual:
+                logger.warning(
+                    "Requested x-settlement-type=individual but tee_id/eth_address/tee_timestamp missing; skipping data settlement",
+                )
+                return "private", None
+            individual_payload = {
+                **batch_payload,
+                "input": _to_serializable_body(request_object),
+                "output": _to_serializable_body(output_object),
+                "tee_id": _normalize_bytes32(str(tee_id)),
+                "timestamp": tee_timestamp,
+                "eth_address": str(eth_address),
+            }
+            
+            return "individual", _encode_settlement_data(individual_payload)
+
+        # Default behavior (no header provided): use batch settlement.
+        return "batch", _encode_settlement_data(batch_payload)
+
     def _route_supports_upto(self, method: str, path: str) -> bool:
         """Check if the matched route accepts the upto scheme."""
         get_route_config = getattr(self._http_server, "_get_route_config", None)
@@ -698,6 +981,9 @@ class PaymentMiddleware:
 
         method = environ.get("REQUEST_METHOD", "GET")
         path = environ.get("PATH_INFO", "/")
+        requested_settlement_type = _normalize_settlement_type(
+            environ.get("HTTP_X_SETTLEMENT_TYPE")
+        )
         if not self._route_supports_upto(method, path):
             return self._make_error_response(
                 start_response,
@@ -820,8 +1106,16 @@ class PaymentMiddleware:
 
             def _iter() -> Iterator[bytes]:
                 charged = False
+                output_hasher = hashlib.sha256()
+                stream_tail = bytearray()
+                max_tail_bytes = 256 * 1024
                 try:
                     for chunk in streaming_wrapper.stream_body(body_iter):
+                        if chunk:
+                            output_hasher.update(chunk)
+                            stream_tail.extend(chunk)
+                            if len(stream_tail) > max_tail_bytes:
+                                del stream_tail[:-max_tail_bytes]
                         if not charged and streaming_wrapper.status_code is not None:
                             _charge_session_if_needed(streaming_wrapper.status_code)
                             charged = True
@@ -829,6 +1123,29 @@ class PaymentMiddleware:
                 finally:
                     if not charged:
                         _charge_session_if_needed(streaming_wrapper.status_code)
+                    if self._should_charge_response(streaming_wrapper.status_code):
+                        tail_text = _bytes_to_text(bytes(stream_tail))
+                        stream_events = _extract_sse_json_events(tail_text)
+                        output_object: Any
+                        if stream_events:
+                            output_object = stream_events[-1]
+                        else:
+                            output_object = tail_text
+                        settlement_type, settlement_data = self._build_settlement_metadata(
+                            request_body_bytes=body_bytes,
+                            response_body_bytes=bytes(stream_tail),
+                            payment_payload=session.permit_payload,
+                            requested_settlement_type=requested_settlement_type,
+                            output_object=output_object,
+                            output_hash="0x" + output_hasher.hexdigest(),
+                        )
+                        if settlement_type != "private":
+                            self._submit_settlement_data_in_background(
+                                session.permit_payload,
+                                session.requirements,
+                                settlement_type=settlement_type,
+                                settlement_data=settlement_data,
+                            )
 
             return _iter()
         else:
@@ -848,6 +1165,21 @@ class PaymentMiddleware:
                     {"error": "Upstream application error", "details": str(e)},
                 )
             _charge_session_if_needed(response_wrapper.status_code)
+            if self._should_charge_response(response_wrapper.status_code):
+                response_body_bytes = b"".join(body_chunks)
+                settlement_type, settlement_data = self._build_settlement_metadata(
+                    request_body_bytes=body_bytes,
+                    response_body_bytes=response_body_bytes,
+                    payment_payload=session.permit_payload,
+                    requested_settlement_type=requested_settlement_type,
+                )
+                if settlement_type != "private":
+                    self._submit_settlement_data_in_background(
+                        session.permit_payload,
+                        session.requirements,
+                        settlement_type=settlement_type,
+                        settlement_data=settlement_data,
+                    )
             response_wrapper.add_header("X-Upto-Session", session_id)
             response_wrapper.send_response(body_chunks)
             return []
@@ -911,6 +1243,8 @@ class PaymentMiddleware:
         result: Any,
         environ: dict[str, Any],
         start_response: Callable[..., Any],
+        request_body_bytes: bytes,
+        requested_settlement_type: str | None = None,
     ) -> Iterator[bytes]:
         response_wrapper = ResponseWrapper(start_response)
         body_chunks: list[bytes] = []
@@ -934,7 +1268,24 @@ class PaymentMiddleware:
             response_wrapper.status_code is not None
             and 200 <= response_wrapper.status_code < 300
         ):
-            self._settle_in_background(result.payment_payload, result.payment_requirements)
+            response_body_bytes = b"".join(body_chunks)
+            settlement_type, settlement_data = self._build_settlement_metadata(
+                request_body_bytes=request_body_bytes,
+                response_body_bytes=response_body_bytes,
+                payment_payload=result.payment_payload,
+                requested_settlement_type=requested_settlement_type,
+            )
+            if settlement_type != "private":
+                self._submit_settlement_data_in_background(
+                    result.payment_payload,
+                    result.payment_requirements,
+                    settlement_type=settlement_type,
+                    settlement_data=settlement_data,
+                )
+            self._settle_in_background(
+                result.payment_payload,
+                result.payment_requirements,
+            )
 
         response_wrapper.send_response(body_chunks)
         return []
@@ -948,6 +1299,8 @@ class PaymentMiddleware:
         result: Any,
         environ: dict[str, Any],
         start_response: Callable[..., Any],
+        request_body_bytes: bytes,
+        requested_settlement_type: str | None = None,
     ) -> Iterator[bytes]:
         streaming_wrapper = StreamingResponseWrapper(start_response)
         body_iter = iter(self._original_wsgi(environ, streaming_wrapper))
@@ -955,32 +1308,51 @@ class PaymentMiddleware:
         payment_requirements = result.payment_requirements
 
         def _iter() -> Iterator[bytes]:
-            settled = False
+            output_hasher = hashlib.sha256()
+            stream_tail = bytearray()
+            max_tail_bytes = 256 * 1024
             try:
                 for chunk in streaming_wrapper.stream_body(body_iter):
-                    if not settled and streaming_wrapper.status_code is not None:
-                        settled = True
-                        if self._should_charge_response(streaming_wrapper.status_code):
-                            self._settle_in_background(
-                                payment_payload, payment_requirements
-                            )
-                        else:
-                            logger.info(
-                                "Skipping settlement for non-success streaming response status=%s",
-                                streaming_wrapper.status_code,
-                            )
+                    if chunk:
+                        output_hasher.update(chunk)
+                        stream_tail.extend(chunk)
+                        if len(stream_tail) > max_tail_bytes:
+                            del stream_tail[:-max_tail_bytes]
                     yield chunk
             finally:
-                if not settled:
-                    if self._should_charge_response(streaming_wrapper.status_code):
-                        self._settle_in_background(
-                            payment_payload, payment_requirements
-                        )
+                if self._should_charge_response(streaming_wrapper.status_code):
+                    tail_text = _bytes_to_text(bytes(stream_tail))
+                    stream_events = _extract_sse_json_events(tail_text)
+                    output_object: Any
+                    if stream_events:
+                        output_object = stream_events[-1]
                     else:
-                        logger.info(
-                            "Skipping settlement for non-success streaming response status=%s",
-                            streaming_wrapper.status_code,
+                        output_object = tail_text
+
+                    settlement_type, settlement_data = self._build_settlement_metadata(
+                        request_body_bytes=request_body_bytes,
+                        response_body_bytes=bytes(stream_tail),
+                        payment_payload=payment_payload,
+                        requested_settlement_type=requested_settlement_type,
+                        output_object=output_object,
+                        output_hash="0x" + output_hasher.hexdigest(),
+                    )
+                    if settlement_type != "private":
+                        self._submit_settlement_data_in_background(
+                            payment_payload,
+                            payment_requirements,
+                            settlement_type=settlement_type,
+                            settlement_data=settlement_data,
                         )
+                    self._settle_in_background(
+                        payment_payload,
+                        payment_requirements,
+                    )
+                else:
+                    logger.info(
+                        "Skipping settlement for non-success streaming response status=%s",
+                        streaming_wrapper.status_code,
+                    )
 
         return _iter()
 
@@ -1013,6 +1385,61 @@ class PaymentMiddleware:
         t = threading.Thread(target=_settle, daemon=True)
         t.start()
 
+    def _submit_settlement_data_in_background(
+        self,
+        payment_payload: Any,
+        payment_requirements: Any,
+        settlement_type: str,
+        settlement_data: str | None = None,
+    ) -> None:
+        """Submit settle_data side-channel payload without blocking response."""
+        def _submit() -> None:
+            try:
+                payload_obj = payment_payload
+                requirements_obj = payment_requirements
+                if isinstance(payment_payload, dict) or isinstance(payment_requirements, dict):
+                    from ...schemas import (
+                        PaymentPayload,
+                        PaymentPayloadV1,
+                        PaymentRequirements,
+                        PaymentRequirementsV1,
+                    )
+
+                    if isinstance(payment_payload, dict):
+                        try:
+                            payload_obj = PaymentPayload.model_validate(payment_payload)
+                        except Exception:
+                            payload_obj = PaymentPayloadV1.model_validate(payment_payload)
+
+                    if isinstance(payment_requirements, dict):
+                        try:
+                            requirements_obj = PaymentRequirements.model_validate(
+                                payment_requirements
+                            )
+                        except Exception:
+                            requirements_obj = PaymentRequirementsV1.model_validate(
+                                payment_requirements
+                            )
+
+                result = self._http_server.process_settlement_data(
+                    payload_obj,
+                    requirements_obj,
+                    settlement_type=settlement_type,
+                    settlement_data=settlement_data,
+                )
+                if result.success:
+                    logger.info("Background settlement data submitted type=%s", settlement_type)
+                else:
+                    logger.warning(
+                        "Background settlement data submission failed: %s",
+                        result.error_reason,
+                    )
+            except Exception as e:
+                logger.warning("Background settlement data error: %s", e)
+
+        t = threading.Thread(target=_submit, daemon=True)
+        t.start()
+
     # ------------------------------------------------------------------
     # Main WSGI entry point
     # ------------------------------------------------------------------
@@ -1027,6 +1454,7 @@ class PaymentMiddleware:
         self._ensure_session_reaper_started()
 
         info = _parse_environ(environ)
+        requested_settlement_type = _normalize_settlement_type(info.get("settlement_type"))
 
         # ---------------------------------------------------------------
         # Phase 0: Check for upto session header
@@ -1251,8 +1679,16 @@ class PaymentMiddleware:
 
                     def _iter() -> Iterator[bytes]:
                         charged = False
+                        output_hasher = hashlib.sha256()
+                        stream_tail = bytearray()
+                        max_tail_bytes = 256 * 1024
                         try:
                             for chunk in streaming_wrapper.stream_body(body_iter):
+                                if chunk:
+                                    output_hasher.update(chunk)
+                                    stream_tail.extend(chunk)
+                                    if len(stream_tail) > max_tail_bytes:
+                                        del stream_tail[:-max_tail_bytes]
                                 if not charged and streaming_wrapper.status_code is not None:
                                     _charge_initial_cost_if_needed(
                                         streaming_wrapper.status_code
@@ -1264,6 +1700,31 @@ class PaymentMiddleware:
                                 _charge_initial_cost_if_needed(
                                     streaming_wrapper.status_code
                                 )
+                            if self._should_charge_response(streaming_wrapper.status_code):
+                                tail_text = _bytes_to_text(bytes(stream_tail))
+                                stream_events = _extract_sse_json_events(tail_text)
+                                output_object: Any
+                                if stream_events:
+                                    output_object = stream_events[-1]
+                                else:
+                                    output_object = tail_text
+                                settlement_type, settlement_data = (
+                                    self._build_settlement_metadata(
+                                        request_body_bytes=body_bytes,
+                                        response_body_bytes=bytes(stream_tail),
+                                        payment_payload=result.payment_payload,
+                                        requested_settlement_type=requested_settlement_type,
+                                        output_object=output_object,
+                                        output_hash="0x" + output_hasher.hexdigest(),
+                                    )
+                                )
+                                if settlement_type != "private":
+                                    self._submit_settlement_data_in_background(
+                                        result.payment_payload,
+                                        result.payment_requirements,
+                                        settlement_type=settlement_type,
+                                        settlement_data=settlement_data,
+                                    )
 
                     return _iter()
                 else:
@@ -1283,6 +1744,21 @@ class PaymentMiddleware:
                             {"error": "Upstream application error", "details": str(e)},
                         )
                     _charge_initial_cost_if_needed(response_wrapper.status_code)
+                    if self._should_charge_response(response_wrapper.status_code):
+                        response_body_bytes = b"".join(body_chunks)
+                        settlement_type, settlement_data = self._build_settlement_metadata(
+                            request_body_bytes=body_bytes,
+                            response_body_bytes=response_body_bytes,
+                            payment_payload=result.payment_payload,
+                            requested_settlement_type=requested_settlement_type,
+                        )
+                        if settlement_type != "private":
+                            self._submit_settlement_data_in_background(
+                                result.payment_payload,
+                                result.payment_requirements,
+                                settlement_type=settlement_type,
+                                settlement_data=settlement_data,
+                            )
                     response_wrapper.add_header("X-Upto-Session", session_id)
                     response_wrapper.send_response(body_chunks)
                     return []
@@ -1305,11 +1781,19 @@ class PaymentMiddleware:
 
             if streaming:
                 return self._handle_streaming_response(
-                    result, environ, start_response
+                    result,
+                    environ,
+                    start_response,
+                    request_body_bytes=body_bytes,
+                    requested_settlement_type=requested_settlement_type,
                 )
             else:
                 return self._handle_buffered_response(
-                    result, environ, start_response
+                    result,
+                    environ,
+                    start_response,
+                    request_body_bytes=body_bytes,
+                    requested_settlement_type=requested_settlement_type,
                 )
 
         # Fallthrough — should not happen

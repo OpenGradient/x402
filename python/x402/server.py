@@ -8,6 +8,7 @@ and settling transactions via facilitator clients.
 from __future__ import annotations
 
 import asyncio
+import inspect
 from typing import Any
 
 from typing_extensions import Self
@@ -47,6 +48,111 @@ __all__ = [
     "FacilitatorClientSync",
     "ResourceConfig",
 ]
+
+
+def _settle_accepts_metadata(settle_method: Any) -> bool:
+    """Return True when settle() supports settlement metadata kwargs."""
+    try:
+        signature = inspect.signature(settle_method)
+    except (TypeError, ValueError):
+        return False
+
+    params = signature.parameters
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return True
+    return "settlement_type" in params and "settlement_data" in params
+
+
+def _settle_data_accepts_payload(settle_data_method: Any) -> bool:
+    """Return True when settle_data() supports settlement_data argument."""
+    try:
+        signature = inspect.signature(settle_data_method)
+    except (TypeError, ValueError):
+        return True
+
+    params = signature.parameters
+    if any(
+        p.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+        for p in params.values()
+    ):
+        return True
+    if "settlement_data" in params:
+        return True
+
+    positional = [
+        p
+        for p in params.values()
+        if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    return len(positional) >= 2
+
+
+async def _call_async_settle(
+    target: Any,
+    payload: PaymentPayload | PaymentPayloadV1,
+    requirements: PaymentRequirements | PaymentRequirementsV1,
+    settlement_type: str | None,
+    settlement_data: str | None,
+) -> Any:
+    """Call async facilitator settle() with backward-compatible kwargs."""
+    settle_method = target.settle
+    if _settle_accepts_metadata(settle_method):
+        return await settle_method(
+            payload,
+            requirements,
+            settlement_type=settlement_type,
+            settlement_data=settlement_data,
+        )
+    return await settle_method(payload, requirements)
+
+
+def _call_sync_settle(
+    target: Any,
+    payload: PaymentPayload | PaymentPayloadV1,
+    requirements: PaymentRequirements | PaymentRequirementsV1,
+    settlement_type: str | None,
+    settlement_data: str | None,
+) -> Any:
+    """Call sync facilitator settle() with backward-compatible kwargs."""
+    settle_method = target.settle
+    if _settle_accepts_metadata(settle_method):
+        return settle_method(
+            payload,
+            requirements,
+            settlement_type=settlement_type,
+            settlement_data=settlement_data,
+        )
+    return settle_method(payload, requirements)
+
+
+async def _call_async_settle_data(
+    target: Any,
+    settlement_type: str,
+    settlement_data: str | None,
+) -> None:
+    """Call async facilitator settle_data() with backward compatibility."""
+    settle_data_method = getattr(target, "settle_data", None)
+    if not callable(settle_data_method):
+        return
+    if _settle_data_accepts_payload(settle_data_method):
+        await settle_data_method(settlement_type, settlement_data)
+    else:
+        await settle_data_method(settlement_type)
+
+
+def _call_sync_settle_data(
+    target: Any,
+    settlement_type: str,
+    settlement_data: str | None,
+) -> None:
+    """Call sync facilitator settle_data() with backward compatibility."""
+    settle_data_method = getattr(target, "settle_data", None)
+    if not callable(settle_data_method):
+        return
+    if _settle_data_accepts_payload(settle_data_method):
+        settle_data_method(settlement_type, settlement_data)
+    else:
+        settle_data_method(settlement_type)
 
 
 # ============================================================================
@@ -176,7 +282,7 @@ class x402ResourceServer(x402ResourceServerBase):
                     if method_name == "verify":
                         result = await target.verify(p, r)
                     else:
-                        result = await target.settle(p, r)
+                        result = await _call_async_settle(target, p, r, None, None)
                 else:
                     result = await self._execute_hook(target, ctx)
         except StopIteration as e:
@@ -192,6 +298,8 @@ class x402ResourceServer(x402ResourceServerBase):
         requirements: PaymentRequirements | PaymentRequirementsV1,
         payload_bytes: bytes | None = None,
         requirements_bytes: bytes | None = None,
+        settlement_type: str | None = None,
+        settlement_data: str | None = None,
     ) -> SettleResponse:
         """Settle a payment via facilitator.
 
@@ -200,6 +308,9 @@ class x402ResourceServer(x402ResourceServerBase):
             requirements: Requirements for settlement.
             payload_bytes: Raw payload bytes (escape hatch).
             requirements_bytes: Raw requirements bytes (escape hatch).
+            settlement_type: Optional settlement type for facilitator side-channel
+                data ("batch", "individual", or "private").
+            settlement_data: Optional base64-encoded settlement JSON payload.
 
         Returns:
             SettleResponse with success=True or success=False.
@@ -220,11 +331,36 @@ class x402ResourceServer(x402ResourceServerBase):
                     if method_name == "verify":
                         result = await target.verify(p, r)
                     else:
-                        result = await target.settle(p, r)
+                        result = await _call_async_settle(
+                            target,
+                            p,
+                            r,
+                            settlement_type,
+                            settlement_data,
+                        )
                 else:
                     result = await self._execute_hook(target, ctx)
         except StopIteration as e:
             return e.value
+
+    async def submit_settlement_data(
+        self,
+        payload: PaymentPayload | PaymentPayloadV1,
+        requirements: PaymentRequirements | PaymentRequirementsV1,
+        settlement_type: str,
+        settlement_data: str | None = None,
+    ) -> None:
+        """Submit settlement metadata independently from payment settlement."""
+        if not self._initialized:
+            raise RuntimeError("Server not initialized. Call initialize() first.")
+
+        scheme = payload.get_scheme()
+        network = payload.get_network()
+        target = self._facilitator_clients_map.get(network, {}).get(scheme)
+        if target is None:
+            return
+
+        await _call_async_settle_data(target, settlement_type, settlement_data)
 
     async def _execute_hook(self, hook: Any, context: Any) -> Any:
         """Execute hook, auto-detecting sync/async."""
@@ -379,7 +515,7 @@ class x402ResourceServerSync(x402ResourceServerBase):
                     if method_name == "verify":
                         result = target.verify(p, r)
                     else:
-                        result = target.settle(p, r)
+                        result = _call_sync_settle(target, p, r, None, None)
                 else:
                     result = self._execute_hook_sync(target, ctx)
         except StopIteration as e:
@@ -395,6 +531,8 @@ class x402ResourceServerSync(x402ResourceServerBase):
         requirements: PaymentRequirements | PaymentRequirementsV1,
         payload_bytes: bytes | None = None,
         requirements_bytes: bytes | None = None,
+        settlement_type: str | None = None,
+        settlement_data: str | None = None,
     ) -> SettleResponse:
         """Settle a payment via facilitator.
 
@@ -403,6 +541,9 @@ class x402ResourceServerSync(x402ResourceServerBase):
             requirements: Requirements for settlement.
             payload_bytes: Raw payload bytes (escape hatch).
             requirements_bytes: Raw requirements bytes (escape hatch).
+            settlement_type: Optional settlement type for facilitator side-channel
+                data ("batch", "individual", or "private").
+            settlement_data: Optional base64-encoded settlement JSON payload.
 
         Returns:
             SettleResponse with success=True or success=False.
@@ -423,11 +564,36 @@ class x402ResourceServerSync(x402ResourceServerBase):
                     if method_name == "verify":
                         result = target.verify(p, r)
                     else:
-                        result = target.settle(p, r)
+                        result = _call_sync_settle(
+                            target,
+                            p,
+                            r,
+                            settlement_type,
+                            settlement_data,
+                        )
                 else:
                     result = self._execute_hook_sync(target, ctx)
         except StopIteration as e:
             return e.value
+
+    def submit_settlement_data(
+        self,
+        payload: PaymentPayload | PaymentPayloadV1,
+        requirements: PaymentRequirements | PaymentRequirementsV1,
+        settlement_type: str,
+        settlement_data: str | None = None,
+    ) -> None:
+        """Submit settlement metadata independently from payment settlement."""
+        if not self._initialized:
+            raise RuntimeError("Server not initialized. Call initialize() first.")
+
+        scheme = payload.get_scheme()
+        network = payload.get_network()
+        target = self._facilitator_clients_map.get(network, {}).get(scheme)
+        if target is None:
+            return
+
+        _call_sync_settle_data(target, settlement_type, settlement_data)
 
     def _execute_hook_sync(self, hook: Any, context: Any) -> Any:
         """Execute hook synchronously. Raises if async hook detected."""

@@ -125,6 +125,8 @@ class x402HTTPResourceServer(x402HTTPServerBase):
         self,
         payment_payload: PaymentPayload | PaymentPayloadV1,
         requirements: PaymentRequirements,
+        settlement_type: str | None = None,
+        settlement_data: str | None = None,
     ) -> ProcessSettleResult:
         """Process settlement after successful response (async).
 
@@ -133,6 +135,8 @@ class x402HTTPResourceServer(x402HTTPServerBase):
         Args:
             payment_payload: The verified payment payload.
             requirements: The matching payment requirements.
+            settlement_type: Optional settlement type for facilitator-side data queues.
+            settlement_data: Optional base64-encoded settlement metadata payload.
 
         Returns:
             ProcessSettleResult with headers if success.
@@ -141,6 +145,8 @@ class x402HTTPResourceServer(x402HTTPServerBase):
             settle_response = await self._server.settle_payment(
                 payment_payload,
                 requirements,
+                settlement_type=settlement_type,
+                settlement_data=settlement_data,
             )
 
             if not settle_response.success:
@@ -157,6 +163,25 @@ class x402HTTPResourceServer(x402HTTPServerBase):
                 payer=settle_response.payer,
             )
 
+        except Exception as e:
+            return ProcessSettleResult(success=False, error_reason=str(e))
+
+    async def process_settlement_data(
+        self,
+        payment_payload: PaymentPayload | PaymentPayloadV1,
+        requirements: PaymentRequirements,
+        settlement_type: str,
+        settlement_data: str | None = None,
+    ) -> ProcessSettleResult:
+        """Submit settlement data side-channel independently from settlement."""
+        try:
+            await self._server.submit_settlement_data(
+                payment_payload,
+                requirements,
+                settlement_type=settlement_type,
+                settlement_data=settlement_data,
+            )
+            return ProcessSettleResult(success=True)
         except Exception as e:
             return ProcessSettleResult(success=False, error_reason=str(e))
 

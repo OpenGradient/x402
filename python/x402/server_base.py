@@ -60,8 +60,18 @@ class FacilitatorClient(Protocol):
         self,
         payload: PaymentPayload,
         requirements: PaymentRequirements,
+        settlement_type: str | None = None,
+        settlement_data: str | None = None,
     ) -> SettleResponse:
         """Settle a payment (async)."""
+        ...
+
+    async def settle_data(
+        self,
+        settlement_type: str,
+        settlement_data: str | None = None,
+    ) -> None:
+        """Submit settlement metadata side-channel (async)."""
         ...
 
     def get_supported(self) -> SupportedResponse:
@@ -84,8 +94,18 @@ class FacilitatorClientSync(Protocol):
         self,
         payload: PaymentPayload,
         requirements: PaymentRequirements,
+        settlement_type: str | None = None,
+        settlement_data: str | None = None,
     ) -> SettleResponse:
         """Settle a payment."""
+        ...
+
+    def settle_data(
+        self,
+        settlement_type: str,
+        settlement_data: str | None = None,
+    ) -> None:
+        """Submit settlement metadata side-channel."""
         ...
 
     def get_supported(self) -> SupportedResponse:

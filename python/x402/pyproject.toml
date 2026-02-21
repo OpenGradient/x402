@@ -1,6 +1,6 @@
 [project]
 name = "og-test-v2-x402"
-version = "0.0.9"
+version = "0.0.10"
 description = "x402 Payment Protocol SDK for Python"
 readme = "README.md"
 license = { text = "MIT" }

@@ -159,6 +159,8 @@ class x402Facilitator(x402FacilitatorBase):
         requirements: PaymentRequirements | PaymentRequirementsV1,
         payload_bytes: bytes | None = None,
         requirements_bytes: bytes | None = None,
+        settlement_type: str | None = None,
+        settlement_data: str | None = None,
     ) -> SettleResponse:
         """Settle a payment.
 
@@ -169,6 +171,8 @@ class x402Facilitator(x402FacilitatorBase):
             requirements: Requirements for settlement.
             payload_bytes: Raw payload bytes (escape hatch for extensions).
             requirements_bytes: Raw requirements bytes (escape hatch).
+            settlement_type: Optional settlement type metadata (ignored for in-process facilitators).
+            settlement_data: Optional settlement payload metadata (ignored for in-process facilitators).
 
         Returns:
             SettleResponse with success=True or success=False.
@@ -313,6 +317,8 @@ class x402FacilitatorSync(x402FacilitatorBase):
         requirements: PaymentRequirements | PaymentRequirementsV1,
         payload_bytes: bytes | None = None,
         requirements_bytes: bytes | None = None,
+        settlement_type: str | None = None,
+        settlement_data: str | None = None,
     ) -> SettleResponse:
         """Settle a payment.
 
@@ -323,6 +329,8 @@ class x402FacilitatorSync(x402FacilitatorBase):
             requirements: Requirements for settlement.
             payload_bytes: Raw payload bytes (escape hatch for extensions).
             requirements_bytes: Raw requirements bytes (escape hatch).
+            settlement_type: Optional settlement type metadata (ignored for in-process facilitators).
+            settlement_data: Optional settlement payload metadata (ignored for in-process facilitators).
 
         Returns:
             SettleResponse with success=True or success=False.

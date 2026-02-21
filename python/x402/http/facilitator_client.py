@@ -124,6 +124,8 @@ class HTTPFacilitatorClient(HTTPFacilitatorClientBase):
         self,
         payload: PaymentPayload | PaymentPayloadV1,
         requirements: PaymentRequirements | PaymentRequirementsV1,
+        settlement_type: str | None = None,
+        settlement_data: str | None = None,
     ) -> SettleResponse:
         """Settle a payment with the facilitator (async).
 
@@ -143,6 +145,14 @@ class HTTPFacilitatorClient(HTTPFacilitatorClientBase):
             payload.model_dump(by_alias=True, exclude_none=True),
             requirements.model_dump(by_alias=True, exclude_none=True),
         )
+
+    async def settle_data(
+        self,
+        settlement_type: str,
+        settlement_data: str | None = None,
+    ) -> None:
+        """Submit settlement data to facilitator (async)."""
+        await self._settle_data_http(settlement_type, settlement_data)
 
     def get_supported(self) -> SupportedResponse:
         """Get supported payment kinds and extensions.
@@ -201,6 +211,8 @@ class HTTPFacilitatorClient(HTTPFacilitatorClientBase):
         self,
         payload_bytes: bytes,
         requirements_bytes: bytes,
+        settlement_type: str | None = None,
+        settlement_data: str | None = None,
     ) -> SettleResponse:
         """Settle payment from raw JSON bytes.
 
@@ -219,7 +231,11 @@ class HTTPFacilitatorClient(HTTPFacilitatorClientBase):
         payload_dict = json.loads(payload_bytes)
         requirements_dict = json.loads(requirements_bytes)
 
-        return await self._settle_http(version, payload_dict, requirements_dict)
+        return await self._settle_http(
+            version,
+            payload_dict,
+            requirements_dict,
+        )
 
     # =========================================================================
     # Internal HTTP Methods (Async)
@@ -266,6 +282,23 @@ class HTTPFacilitatorClient(HTTPFacilitatorClientBase):
             raise ValueError(f"Facilitator settle failed ({response.status_code}): {response.text}")
 
         return SettleResponse.model_validate(response.json())
+
+    async def _settle_data_http(
+        self,
+        settlement_type: str,
+        settlement_data: str | None = None,
+    ) -> None:
+        """Internal settle_data via HTTP (async)."""
+        client = self._get_async_client()
+        response = await client.post(
+            f"{self._url}/settle_data",
+            headers=self._get_settle_data_headers(settlement_type, settlement_data),
+            json={},
+        )
+        if response.status_code not in (200, 202):
+            raise ValueError(
+                f"Facilitator settle_data failed ({response.status_code}): {response.text}"
+            )
 
 
 # ============================================================================
@@ -342,6 +375,8 @@ class HTTPFacilitatorClientSync(HTTPFacilitatorClientBase):
         self,
         payload: PaymentPayload | PaymentPayloadV1,
         requirements: PaymentRequirements | PaymentRequirementsV1,
+        settlement_type: str | None = None,
+        settlement_data: str | None = None,
     ) -> SettleResponse:
         """Settle a payment with the facilitator.
 
@@ -361,6 +396,14 @@ class HTTPFacilitatorClientSync(HTTPFacilitatorClientBase):
             payload.model_dump(by_alias=True, exclude_none=True),
             requirements.model_dump(by_alias=True, exclude_none=True),
         )
+
+    def settle_data(
+        self,
+        settlement_type: str,
+        settlement_data: str | None = None,
+    ) -> None:
+        """Submit settlement data to facilitator (sync)."""
+        self._settle_data_http(settlement_type, settlement_data)
 
     def get_supported(self) -> SupportedResponse:
         """Get supported payment kinds and extensions.
@@ -417,6 +460,8 @@ class HTTPFacilitatorClientSync(HTTPFacilitatorClientBase):
         self,
         payload_bytes: bytes,
         requirements_bytes: bytes,
+        settlement_type: str | None = None,
+        settlement_data: str | None = None,
     ) -> SettleResponse:
         """Settle payment from raw JSON bytes.
 
@@ -435,7 +480,11 @@ class HTTPFacilitatorClientSync(HTTPFacilitatorClientBase):
         payload_dict = json.loads(payload_bytes)
         requirements_dict = json.loads(requirements_bytes)
 
-        return self._settle_http(version, payload_dict, requirements_dict)
+        return self._settle_http(
+            version,
+            payload_dict,
+            requirements_dict,
+        )
 
     # =========================================================================
     # Internal HTTP Methods
@@ -482,3 +531,20 @@ class HTTPFacilitatorClientSync(HTTPFacilitatorClientBase):
             raise ValueError(f"Facilitator settle failed ({response.status_code}): {response.text}")
 
         return SettleResponse.model_validate(response.json())
+
+    def _settle_data_http(
+        self,
+        settlement_type: str,
+        settlement_data: str | None = None,
+    ) -> None:
+        """Internal settle_data via HTTP."""
+        client = self._get_client()
+        response = client.post(
+            f"{self._url}/settle_data",
+            headers=self._get_settle_data_headers(settlement_type, settlement_data),
+            json={},
+        )
+        if response.status_code not in (200, 202):
+            raise ValueError(
+                f"Facilitator settle_data failed ({response.status_code}): {response.text}"
+            )

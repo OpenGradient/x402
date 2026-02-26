@@ -42,6 +42,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("x402.middleware")
 
+SessionCostCalculator = Callable[[dict[str, Any]], Any]
+
 
 # ============================================================================
 # Extension Auto-Registration
@@ -617,6 +619,7 @@ class PaymentMiddleware:
         session_store: "SessionStoreProtocol | None" = None,
         cost_per_request: int | None = None,
         session_idle_timeout: int = 180,
+        session_cost_calculator: SessionCostCalculator | None = None,
     ) -> None:
         if _check_if_bazaar_needed(routes):
             _register_bazaar_extension(server)
@@ -635,6 +638,7 @@ class PaymentMiddleware:
         self._session_store = session_store
         self._cost_per_request = cost_per_request
         self._session_idle_timeout = session_idle_timeout
+        self._session_cost_calculator = session_cost_calculator
 
         if paywall_provider:
             self._http_server.register_paywall_provider(paywall_provider)
@@ -827,17 +831,7 @@ class PaymentMiddleware:
         2. Requirements amount (fallback)
         """
         def _parse_positive_int(value: Any) -> int:
-            if value is None:
-                return 0
-            try:
-                return max(0, int(value))
-            except (TypeError, ValueError):
-                try:
-                    from decimal import Decimal, InvalidOperation
-
-                    return max(0, int(Decimal(str(value))))
-                except (InvalidOperation, ValueError, TypeError):
-                    return 0
+            return self._coerce_non_negative_int(value)
 
         if self._cost_per_request is not None:
             return _parse_positive_int(self._cost_per_request)
@@ -849,6 +843,78 @@ class PaymentMiddleware:
             amount = requirements.get("amount")
 
         return _parse_positive_int(amount)
+
+    @staticmethod
+    def _coerce_non_negative_int(value: Any) -> int:
+        if value is None:
+            return 0
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            try:
+                from decimal import Decimal, InvalidOperation
+
+                return max(0, int(Decimal(str(value))))
+            except (InvalidOperation, ValueError, TypeError):
+                return 0
+
+    def _resolve_session_request_cost(
+        self,
+        *,
+        method: str,
+        path: str,
+        request_body_bytes: bytes,
+        response_body_bytes: bytes,
+        payment_payload: Any,
+        payment_requirements: Any,
+        status_code: int | None,
+        output_object: Any | None = None,
+        is_streaming: bool = False,
+    ) -> int:
+        """Resolve actual UPTO request cost (dynamic callback + static fallback)."""
+        default_cost = self._get_session_cost(payment_requirements)
+
+        if not self._should_charge_response(status_code):
+            return default_cost
+        if not callable(self._session_cost_calculator):
+            return default_cost
+
+        request_object = _parse_json_bytes(request_body_bytes)
+        if output_object is None:
+            response_object = _parse_json_bytes(response_body_bytes)
+        else:
+            response_object = output_object
+
+        callback_context = {
+            "method": method,
+            "path": path,
+            "status_code": status_code,
+            "is_streaming": is_streaming,
+            "request_body_bytes": request_body_bytes,
+            "response_body_bytes": response_body_bytes,
+            "request_json": request_object if isinstance(request_object, (dict, list)) else None,
+            "response_json": response_object if isinstance(response_object, (dict, list)) else None,
+            "response_object": response_object,
+            "payment_payload": payment_payload,
+            "payment_requirements": payment_requirements,
+            "default_cost": default_cost,
+        }
+
+        try:
+            dynamic_cost = self._session_cost_calculator(callback_context)
+            if dynamic_cost is None:
+                return default_cost
+            parsed_dynamic_cost = self._coerce_non_negative_int(dynamic_cost)
+            return parsed_dynamic_cost
+        except Exception as e:
+            logger.warning(
+                "Session dynamic cost calculator failed for %s %s, falling back to static cost=%d: %s",
+                method,
+                path,
+                default_cost,
+                e,
+            )
+            return default_cost
 
     @staticmethod
     def _should_charge_response(status_code: int | None) -> bool:
@@ -904,8 +970,13 @@ class PaymentMiddleware:
         tee_timestamp = extracted_tee_timestamp
 
         if not tee_signature:
-            # No trustworthy TEE signature on output; mark as private/no-op data settlement.
-            return "private", None
+            if requested_settlement_type == "individual":
+                # Keep individual strict for now; it requires actual TEE fields.
+                return "private", None
+            logger.warning(
+                "TEE signature missing in response; using placeholder tee_signature=0x for batch settlement"
+            )
+            tee_signature = "0x"
 
         batch_payload = {
             "input_hash": computed_input_hash,
@@ -932,7 +1003,7 @@ class PaymentMiddleware:
                 "input": _to_serializable_body(request_object),
                 "output": _to_serializable_body(output_object),
                 "tee_id": _normalize_bytes32(str(tee_id)),
-                "timestamp": tee_timestamp,
+                "tee_timestamp": tee_timestamp,
                 "eth_address": str(eth_address),
             }
             
@@ -1039,8 +1110,8 @@ class PaymentMiddleware:
             )
 
         # Check if session can afford the request
-        cost = self._get_session_cost(session.requirements)
-        if cost <= 0:
+        estimated_cost = self._get_session_cost(session.requirements)
+        if estimated_cost <= 0:
             logger.warning(
                 "Session %s has non-positive per-request cost; refusing session reuse",
                 session_id,
@@ -1053,7 +1124,7 @@ class PaymentMiddleware:
                     "code": "upto_invalid_session_cost",
                 },
             )
-        if cost > session.remaining_budget:
+        if estimated_cost > session.remaining_budget:
             self._settle_session(session, reason="cap_reached_precheck")
             return self._make_error_response(
                 start_response,
@@ -1075,7 +1146,13 @@ class PaymentMiddleware:
         if wsgi_input and hasattr(wsgi_input, "seek"):
             wsgi_input.seek(0)
 
-        def _charge_session_if_needed(status_code: int | None) -> None:
+        def _charge_session_if_needed(
+            status_code: int | None,
+            *,
+            response_body_bytes: bytes = b"",
+            output_object: Any | None = None,
+            is_streaming: bool = False,
+        ) -> None:
             if not self._session_store:
                 return
             if not self._should_charge_response(status_code):
@@ -1087,13 +1164,41 @@ class PaymentMiddleware:
                     status_code,
                 )
                 return
-            if self._session_store.add_cost(session_id, cost):
+            request_cost = self._resolve_session_request_cost(
+                method=method,
+                path=path,
+                request_body_bytes=body_bytes,
+                response_body_bytes=response_body_bytes,
+                payment_payload=session.permit_payload,
+                payment_requirements=session.requirements,
+                status_code=status_code,
+                output_object=output_object,
+                is_streaming=is_streaming,
+            )
+            if self._session_store.add_cost(session_id, request_cost):
+                return
+            latest = self._session_store.get_session(session_id)
+            if (
+                latest is not None
+                and request_cost > latest.remaining_budget
+                and latest.remaining_budget > 0
+                and self._session_store.add_cost(session_id, latest.remaining_budget)
+            ):
+                logger.warning(
+                    "Session %s request cost=%d exceeded remaining budget; clamped to cap with charge=%d",
+                    session_id,
+                    request_cost,
+                    latest.remaining_budget,
+                )
+                latest_after_clamp = self._session_store.get_session(session_id)
+                if latest_after_clamp is not None:
+                    self._settle_session(latest_after_clamp, reason="cap_reached_post_response")
                 return
             logger.warning(
-                "Session %s cost application failed after successful response; likely cap race",
+                "Session %s cost application failed after successful response (cost=%d); likely cap race",
                 session_id,
+                request_cost,
             )
-            latest = self._session_store.get_session(session_id)
             if latest is not None:
                 self._settle_session(latest, reason="cap_reached_post_response")
 
@@ -1116,21 +1221,30 @@ class PaymentMiddleware:
                             stream_tail.extend(chunk)
                             if len(stream_tail) > max_tail_bytes:
                                 del stream_tail[:-max_tail_bytes]
-                        if not charged and streaming_wrapper.status_code is not None:
+                        if (
+                            not charged
+                            and streaming_wrapper.status_code is not None
+                            and not callable(self._session_cost_calculator)
+                        ):
                             _charge_session_if_needed(streaming_wrapper.status_code)
                             charged = True
                         yield chunk
                 finally:
+                    tail_text = _bytes_to_text(bytes(stream_tail))
+                    stream_events = _extract_sse_json_events(tail_text)
+                    output_object: Any
+                    if stream_events:
+                        output_object = stream_events[-1]
+                    else:
+                        output_object = tail_text
                     if not charged:
-                        _charge_session_if_needed(streaming_wrapper.status_code)
+                        _charge_session_if_needed(
+                            streaming_wrapper.status_code,
+                            response_body_bytes=bytes(stream_tail),
+                            output_object=output_object,
+                            is_streaming=True,
+                        )
                     if self._should_charge_response(streaming_wrapper.status_code):
-                        tail_text = _bytes_to_text(bytes(stream_tail))
-                        stream_events = _extract_sse_json_events(tail_text)
-                        output_object: Any
-                        if stream_events:
-                            output_object = stream_events[-1]
-                        else:
-                            output_object = tail_text
                         settlement_type, settlement_data = self._build_settlement_metadata(
                             request_body_bytes=body_bytes,
                             response_body_bytes=bytes(stream_tail),
@@ -1164,9 +1278,13 @@ class PaymentMiddleware:
                     "502 Bad Gateway",
                     {"error": "Upstream application error", "details": str(e)},
                 )
-            _charge_session_if_needed(response_wrapper.status_code)
+            response_body_bytes = b"".join(body_chunks)
+            _charge_session_if_needed(
+                response_wrapper.status_code,
+                response_body_bytes=response_body_bytes,
+                is_streaming=False,
+            )
             if self._should_charge_response(response_wrapper.status_code):
-                response_body_bytes = b"".join(body_chunks)
                 settlement_type, settlement_data = self._build_settlement_metadata(
                     request_body_bytes=body_bytes,
                     response_body_bytes=response_body_bytes,
@@ -1601,18 +1719,18 @@ class PaymentMiddleware:
                     route_path=info["path"],
                 )
 
-                cost = self._get_session_cost(req_data)
+                estimated_cost = self._get_session_cost(req_data)
                 logger.info(
                     "UPTO_SESSION_CREATED id=%s method=%s path=%s cap=%d initial_cost=%d deadline=%s",
                     session_id,
                     info["method"],
                     info["path"],
                     max_amount,
-                    cost,
+                    estimated_cost,
                     deadline,
                 )
 
-                if cost <= 0:
+                if estimated_cost <= 0:
                     logger.warning(
                         "Refusing upto session creation with non-positive per-request cost"
                     )
@@ -1625,7 +1743,7 @@ class PaymentMiddleware:
                             "code": "upto_invalid_session_cost",
                         },
                     )
-                if cost > max_amount:
+                if estimated_cost > max_amount:
                     self._session_store.close_session(session_id)
                     return self._make_error_response(
                         start_response,
@@ -1636,7 +1754,13 @@ class PaymentMiddleware:
                         },
                     )
 
-                def _charge_initial_cost_if_needed(status_code: int | None) -> bool:
+                def _charge_initial_cost_if_needed(
+                    status_code: int | None,
+                    *,
+                    response_body_bytes: bytes = b"",
+                    output_object: Any | None = None,
+                    is_streaming: bool = False,
+                ) -> bool:
                     if not self._session_store:
                         return False
                     if not self._should_charge_response(status_code):
@@ -1648,13 +1772,43 @@ class PaymentMiddleware:
                             status_code,
                         )
                         return False
-                    if self._session_store.add_cost(session_id, cost):
+                    request_cost = self._resolve_session_request_cost(
+                        method=info["method"],
+                        path=info["path"],
+                        request_body_bytes=body_bytes,
+                        response_body_bytes=response_body_bytes,
+                        payment_payload=result.payment_payload,
+                        payment_requirements=result.payment_requirements,
+                        status_code=status_code,
+                        output_object=output_object,
+                        is_streaming=is_streaming,
+                    )
+                    if self._session_store.add_cost(session_id, request_cost):
+                        return True
+                    current = self._session_store.get_session(session_id)
+                    if (
+                        current is not None
+                        and request_cost > current.remaining_budget
+                        and current.remaining_budget > 0
+                        and self._session_store.add_cost(session_id, current.remaining_budget)
+                    ):
+                        logger.warning(
+                            "Session %s request cost=%d exceeded remaining budget; clamped to cap with charge=%d",
+                            session_id,
+                            request_cost,
+                            current.remaining_budget,
+                        )
+                        current_after_clamp = self._session_store.get_session(session_id)
+                        if current_after_clamp is not None:
+                            self._settle_session(
+                                current_after_clamp, reason="initial_cost_post_response"
+                            )
                         return True
                     logger.warning(
-                        "Session %s initial cost application failed after successful response",
+                        "Session %s request cost application failed after successful response (cost=%d)",
                         session_id,
+                        request_cost,
                     )
-                    current = self._session_store.get_session(session_id)
                     if current is not None:
                         self._settle_session(current, reason="initial_cost_post_response")
                     return False
@@ -1689,25 +1843,32 @@ class PaymentMiddleware:
                                     stream_tail.extend(chunk)
                                     if len(stream_tail) > max_tail_bytes:
                                         del stream_tail[:-max_tail_bytes]
-                                if not charged and streaming_wrapper.status_code is not None:
+                                if (
+                                    not charged
+                                    and streaming_wrapper.status_code is not None
+                                    and not callable(self._session_cost_calculator)
+                                ):
                                     _charge_initial_cost_if_needed(
                                         streaming_wrapper.status_code
                                     )
                                     charged = True
                                 yield chunk
                         finally:
+                            tail_text = _bytes_to_text(bytes(stream_tail))
+                            stream_events = _extract_sse_json_events(tail_text)
+                            output_object: Any
+                            if stream_events:
+                                output_object = stream_events[-1]
+                            else:
+                                output_object = tail_text
                             if not charged:
                                 _charge_initial_cost_if_needed(
-                                    streaming_wrapper.status_code
+                                    streaming_wrapper.status_code,
+                                    response_body_bytes=bytes(stream_tail),
+                                    output_object=output_object,
+                                    is_streaming=True,
                                 )
                             if self._should_charge_response(streaming_wrapper.status_code):
-                                tail_text = _bytes_to_text(bytes(stream_tail))
-                                stream_events = _extract_sse_json_events(tail_text)
-                                output_object: Any
-                                if stream_events:
-                                    output_object = stream_events[-1]
-                                else:
-                                    output_object = tail_text
                                 settlement_type, settlement_data = (
                                     self._build_settlement_metadata(
                                         request_body_bytes=body_bytes,
@@ -1743,9 +1904,13 @@ class PaymentMiddleware:
                             "502 Bad Gateway",
                             {"error": "Upstream application error", "details": str(e)},
                         )
-                    _charge_initial_cost_if_needed(response_wrapper.status_code)
+                    response_body_bytes = b"".join(body_chunks)
+                    _charge_initial_cost_if_needed(
+                        response_wrapper.status_code,
+                        response_body_bytes=response_body_bytes,
+                        is_streaming=False,
+                    )
                     if self._should_charge_response(response_wrapper.status_code):
-                        response_body_bytes = b"".join(body_chunks)
                         settlement_type, settlement_data = self._build_settlement_metadata(
                             request_body_bytes=body_bytes,
                             response_body_bytes=response_body_bytes,
@@ -1816,6 +1981,7 @@ def payment_middleware(
     session_store: "SessionStoreProtocol | None" = None,
     cost_per_request: int | None = None,
     session_idle_timeout: int = 300,
+    session_cost_calculator: SessionCostCalculator | None = None,
 ) -> PaymentMiddleware:
     return PaymentMiddleware(
         app,
@@ -1827,6 +1993,7 @@ def payment_middleware(
         session_store,
         cost_per_request,
         session_idle_timeout,
+        session_cost_calculator,
     )
 
 

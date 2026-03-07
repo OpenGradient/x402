@@ -304,6 +304,70 @@ def _extract_tee_fields(output_obj: Any, fallback_text: str | None = None) -> tu
     return tee_signature, tee_id
 
 
+def _extract_tee_hashes(output_obj: Any, fallback_text: str | None = None) -> tuple[str | None, str | None]:
+    """Extract request/output hashes produced by upstream TEE server when available."""
+    input_hash_keys = ("tee_request_hash", "request_hash", "input_hash")
+    output_hash_keys = ("tee_output_hash", "output_hash")
+
+    extracted_input_hash: str | None = None
+    extracted_output_hash: str | None = None
+
+    # Fast path: expected top-level schema from gateway responses.
+    if isinstance(output_obj, dict):
+        for key in input_hash_keys:
+            value = output_obj.get(key)
+            if isinstance(value, str) and value:
+                extracted_input_hash = value
+                break
+        for key in output_hash_keys:
+            value = output_obj.get(key)
+            if isinstance(value, str) and value:
+                extracted_output_hash = value
+                break
+
+    # Compatibility path: deep search for alternate shapes.
+    if not extracted_input_hash or not extracted_output_hash:
+        normalized_input_hash_keys = {"teerequesthash", "requesthash", "inputhash"}
+        normalized_output_hash_keys = {"teeoutputhash", "outputhash"}
+
+        if not extracted_input_hash:
+            input_hash_value = _find_first_by_normalized_key(output_obj, normalized_input_hash_keys)
+            if input_hash_value is not None:
+                extracted_input_hash = str(input_hash_value)
+        if not extracted_output_hash:
+            output_hash_value = _find_first_by_normalized_key(output_obj, normalized_output_hash_keys)
+            if output_hash_value is not None:
+                extracted_output_hash = str(output_hash_value)
+
+    if fallback_text:
+        if not extracted_input_hash:
+            input_match = re.search(
+                r'"(?:tee[_\s-]?request[_\s-]?hash|request[_\s-]?hash|input[_\s-]?hash)"\s*:\s*"([^"]+)"',
+                fallback_text,
+                re.IGNORECASE,
+            )
+            if input_match:
+                extracted_input_hash = input_match.group(1)
+        if not extracted_output_hash:
+            output_match = re.search(
+                r'"(?:tee[_\s-]?output[_\s-]?hash|output[_\s-]?hash)"\s*:\s*"([^"]+)"',
+                fallback_text,
+                re.IGNORECASE,
+            )
+            if output_match:
+                extracted_output_hash = output_match.group(1)
+
+    normalized_input_hash: str | None = None
+    normalized_output_hash: str | None = None
+
+    if extracted_input_hash and _is_hex_bytes32(extracted_input_hash):
+        normalized_input_hash = _normalize_bytes32(extracted_input_hash)
+    if extracted_output_hash and _is_hex_bytes32(extracted_output_hash):
+        normalized_output_hash = _normalize_bytes32(extracted_output_hash)
+
+    return normalized_input_hash, normalized_output_hash
+
+
 def _to_unix_uint256_timestamp(value: Any) -> int | None:
     """Convert common timestamp formats into unix epoch seconds."""
     if value is None or isinstance(value, bool):
@@ -950,9 +1014,6 @@ class PaymentMiddleware:
         if requested_settlement_type == "private":
             return "private", None
 
-        computed_input_hash = input_hash or _sha256_bytes32(request_body_bytes)
-        computed_output_hash = output_hash or _sha256_bytes32(response_body_bytes)
-
         request_object = _parse_json_bytes(request_body_bytes)
         if request_object is None:
             request_object = _bytes_to_text(request_body_bytes)
@@ -963,8 +1024,13 @@ class PaymentMiddleware:
                 output_object = _bytes_to_text(response_body_bytes)
 
         fallback_text = _bytes_to_text(response_body_bytes)
+        extracted_input_hash, extracted_output_hash = _extract_tee_hashes(output_object, fallback_text)
         extracted_signature, extracted_tee_id = _extract_tee_fields(output_object, fallback_text)
         extracted_tee_timestamp = _extract_tee_timestamp(output_object, fallback_text)
+
+        computed_input_hash = extracted_input_hash or input_hash or _sha256_bytes32(request_body_bytes)
+        computed_output_hash = extracted_output_hash or output_hash or _sha256_bytes32(response_body_bytes)
+
         tee_signature = tee_signature or extracted_signature
         tee_id = tee_id or extracted_tee_id or "0xddc21f2d5d0af861b4fc1390df47f1c93bc5aee54e7e31763e97256d56148253"
         tee_timestamp = extracted_tee_timestamp

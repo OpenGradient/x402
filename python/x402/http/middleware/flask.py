@@ -44,6 +44,12 @@ logger = logging.getLogger("x402.middleware")
 
 SessionCostCalculator = Callable[[dict[str, Any]], Any]
 
+TEE_SIGNATURE_HEADER = "X-TEE-Signature"
+TEE_ID_HEADER = "X-TEE-ID"
+TEE_TIMESTAMP_HEADER = "X-TEE-Timestamp"
+TEE_REQUEST_HASH_HEADER = "X-TEE-Request-Hash"
+TEE_OUTPUT_HASH_HEADER = "X-TEE-Output-Hash"
+
 
 # ============================================================================
 # Extension Auto-Registration
@@ -472,6 +478,23 @@ def _to_serializable_body(value: Any) -> Any:
 def _encode_settlement_data(payload: dict[str, Any]) -> str:
     encoded = json.dumps(payload, separators=(",", ":"), default=str).encode("utf-8")
     return base64.b64encode(encoded).decode("ascii")
+
+
+def _extract_tee_proof_metadata(
+    output_obj: Any,
+    fallback_text: str | None = None,
+) -> dict[str, Any]:
+    tee_signature, tee_id = _extract_tee_fields(output_obj, fallback_text)
+    tee_input_hash, tee_output_hash = _extract_tee_hashes(output_obj, fallback_text)
+    tee_timestamp = _extract_tee_timestamp(output_obj, fallback_text)
+
+    return {
+        "tee_signature": tee_signature,
+        "tee_id": tee_id,
+        "tee_timestamp": tee_timestamp,
+        "tee_input_hash": tee_input_hash,
+        "tee_output_hash": tee_output_hash,
+    }
 
 
 # ============================================================================
@@ -1078,6 +1101,57 @@ class PaymentMiddleware:
         # Default behavior (no header provided): use batch settlement.
         return "batch", _encode_settlement_data(batch_payload)
 
+    def _append_tee_response_headers(
+        self,
+        *,
+        response_wrapper: ResponseWrapper,
+        request_body_bytes: bytes,
+        response_body_bytes: bytes,
+        output_object: Any | None = None,
+        tee_signature: str | None = None,
+        tee_id: str | None = None,
+        input_hash: str | None = None,
+        output_hash: str | None = None,
+    ) -> None:
+        """Expose proof metadata to the client as response headers."""
+        resolved_output_object = output_object
+        if resolved_output_object is None:
+            resolved_output_object = _parse_json_bytes(response_body_bytes)
+            if resolved_output_object is None:
+                resolved_output_object = _bytes_to_text(response_body_bytes)
+
+        fallback_text = _bytes_to_text(response_body_bytes)
+        extracted = _extract_tee_proof_metadata(
+            resolved_output_object,
+            fallback_text=fallback_text,
+        )
+
+        resolved_signature = tee_signature or extracted.get("tee_signature")
+        resolved_tee_id = tee_id or extracted.get("tee_id")
+        resolved_timestamp = extracted.get("tee_timestamp")
+
+        resolved_input_hash = (
+            extracted.get("tee_input_hash")
+            or input_hash
+            or _sha256_bytes32(request_body_bytes)
+        )
+        resolved_output_hash = (
+            extracted.get("tee_output_hash")
+            or output_hash
+            or _sha256_bytes32(response_body_bytes)
+        )
+
+        if resolved_signature and resolved_signature != "0x":
+            response_wrapper.add_header(TEE_SIGNATURE_HEADER, str(resolved_signature))
+        if resolved_tee_id and _is_hex_bytes32(str(resolved_tee_id)):
+            response_wrapper.add_header(TEE_ID_HEADER, _normalize_bytes32(str(resolved_tee_id)))
+        if resolved_timestamp is not None:
+            response_wrapper.add_header(TEE_TIMESTAMP_HEADER, str(resolved_timestamp))
+        if resolved_input_hash:
+            response_wrapper.add_header(TEE_REQUEST_HASH_HEADER, str(resolved_input_hash))
+        if resolved_output_hash:
+            response_wrapper.add_header(TEE_OUTPUT_HASH_HEADER, str(resolved_output_hash))
+
     def _route_supports_upto(self, method: str, path: str) -> bool:
         """Check if the matched route accepts the upto scheme."""
         get_route_config = getattr(self._http_server, "_get_route_config", None)
@@ -1350,6 +1424,11 @@ class PaymentMiddleware:
                 response_body_bytes=response_body_bytes,
                 is_streaming=False,
             )
+            self._append_tee_response_headers(
+                response_wrapper=response_wrapper,
+                request_body_bytes=body_bytes,
+                response_body_bytes=response_body_bytes,
+            )
             if self._should_charge_response(response_wrapper.status_code):
                 settlement_type, settlement_data = self._build_settlement_metadata(
                     request_body_bytes=body_bytes,
@@ -1453,6 +1532,11 @@ class PaymentMiddleware:
             and 200 <= response_wrapper.status_code < 300
         ):
             response_body_bytes = b"".join(body_chunks)
+            self._append_tee_response_headers(
+                response_wrapper=response_wrapper,
+                request_body_bytes=request_body_bytes,
+                response_body_bytes=response_body_bytes,
+            )
             settlement_type, settlement_data = self._build_settlement_metadata(
                 request_body_bytes=request_body_bytes,
                 response_body_bytes=response_body_bytes,
@@ -1975,6 +2059,11 @@ class PaymentMiddleware:
                         response_wrapper.status_code,
                         response_body_bytes=response_body_bytes,
                         is_streaming=False,
+                    )
+                    self._append_tee_response_headers(
+                        response_wrapper=response_wrapper,
+                        request_body_bytes=body_bytes,
+                        response_body_bytes=response_body_bytes,
                     )
                     if self._should_charge_response(response_wrapper.status_code):
                         settlement_type, settlement_data = self._build_settlement_metadata(

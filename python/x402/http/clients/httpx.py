@@ -6,9 +6,10 @@ Provides transport wrapper and convenience classes for httpx AsyncClient.
 from __future__ import annotations
 
 import json
+import ssl
 import logging
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Union
 
 try:
     import httpx
@@ -22,6 +23,8 @@ if TYPE_CHECKING:
     from ...client import x402Client, x402ClientConfig
     from ..x402_http_client import x402HTTPClient
 
+# Type alias for httpx's verify parameter: bool, str (CA bundle path), or ssl.SSLContext
+SSLVerifyTypes = Union[bool, str, ssl.SSLContext]
 logger = logging.getLogger("x402.httpx")
 
 
@@ -69,12 +72,19 @@ class x402AsyncTransport(AsyncBaseTransport):
         self,
         client: x402Client | x402HTTPClient,
         transport: AsyncBaseTransport | None = None,
+        verify: SSLVerifyTypes = True,
     ) -> None:
         """Initialize payment transport.
 
         Args:
             client: x402Client or x402HTTPClient for payment handling.
-            transport: Optional underlying transport. If None, uses httpx default.
+            transport: Optional underlying transport. If None, creates one
+                       with the given verify setting.
+            verify: SSL verification setting propagated to the inner transport.
+                    - True: default CA bundle verification (default)
+                    - False: disable SSL verification (self-signed certs)
+                    - str: path to a CA bundle or directory
+                    - ssl.SSLContext: fully custom SSL context
         """
         from ..x402_http_client import x402HTTPClient as HTTPClient
 
@@ -83,7 +93,7 @@ class x402AsyncTransport(AsyncBaseTransport):
         else:
             self._http_client = HTTPClient(client)
         self._client = client
-        self._transport = transport or httpx.AsyncHTTPTransport()
+        self._transport = transport or httpx.AsyncHTTPTransport(verify=verify)
 
         # Session store: maps "host:path" -> session_id
         self._sessions: dict[str, str] = {}
@@ -244,7 +254,7 @@ class x402AsyncTransport(AsyncBaseTransport):
                 extensions=new_extensions,
             )
 
-            # Retry using same transport
+            # Retry using same transport (inherits SSL settings)
             retry_response = await self._transport.handle_async_request(retry_request)
 
             # Capture session from the retry response (server creates session on first payment)
@@ -278,12 +288,14 @@ class x402AsyncTransport(AsyncBaseTransport):
 def x402_httpx_transport(
     client: x402Client | x402HTTPClient,
     transport: AsyncBaseTransport | None = None,
+    verify: SSLVerifyTypes = True,
 ) -> x402AsyncTransport:
     """Create an httpx transport with 402 payment handling.
 
     Args:
         client: x402Client or x402HTTPClient for payment handling.
         transport: Optional underlying transport. If None, uses httpx default.
+        verify: SSL verification setting for the inner transport.
 
     Returns:
         Transport that handles 402 responses with automatic payment retry.
@@ -298,12 +310,12 @@ def x402_httpx_transport(
         # ... register schemes ...
 
         async with httpx.AsyncClient(
-            transport=x402_httpx_transport(client)
+            transport=x402_httpx_transport(client, verify=False)
         ) as http:
             response = await http.get("https://api.example.com/paid")
         ```
     """
-    return x402AsyncTransport(client, transport)
+    return x402AsyncTransport(client, transport, verify=verify)
 
 
 # Legacy alias for backwards compatibility (event hooks don't work correctly)
@@ -340,7 +352,9 @@ def wrapHttpxWithPayment(
 ) -> httpx.AsyncClient:
     """Create an httpx AsyncClient with automatic 402 payment handling.
 
-    Creates a new client with payment transport configured.
+    Creates a new client with payment transport configured. SSL settings
+    from httpx_kwargs (verify) are automatically propagated to the inner
+    transport used for payment retries.
 
     Note: Unlike the old API, this creates a new client rather than
     wrapping an existing one, because httpx doesn't allow replacing
@@ -349,6 +363,8 @@ def wrapHttpxWithPayment(
     Args:
         x402_client: x402Client or x402HTTPClient for payments.
         **httpx_kwargs: Additional arguments for httpx.AsyncClient.
+            The ``verify`` kwarg is extracted and propagated to the
+            inner transport so payment retries use the same SSL config.
 
     Returns:
         New AsyncClient with payment handling configured.
@@ -362,11 +378,12 @@ def wrapHttpxWithPayment(
         x402 = x402Client()
         # ... register schemes ...
 
-        async with wrapHttpxWithPayment(x402) as client:
+        async with wrapHttpxWithPayment(x402, verify=False) as client:
             response = await client.get("https://api.example.com/paid")
         ```
     """
-    transport = x402AsyncTransport(x402_client)
+    verify = httpx_kwargs.get("verify", True)
+    transport = x402AsyncTransport(x402_client, verify=verify)
     return httpx.AsyncClient(transport=transport, **httpx_kwargs)
 
 
@@ -402,7 +419,7 @@ def wrapHttpxWithPaymentFromConfig(
             ],
         )
 
-        async with wrapHttpxWithPaymentFromConfig(config) as client:
+        async with wrapHttpxWithPaymentFromConfig(config, verify=False) as client:
             response = await client.get("https://api.example.com/paid")
         ```
     """
@@ -423,6 +440,10 @@ class x402HttpxClient(httpx.AsyncClient):
     Convenience class that wraps httpx.AsyncClient with automatic
     402 payment handling using a custom transport.
 
+    SSL/TLS settings are automatically propagated to the inner transport
+    so that payment retries (after receiving a 402) use the same SSL
+    configuration as the initial request.
+
     Example:
         ```python
         from x402 import x402Client
@@ -431,8 +452,19 @@ class x402HttpxClient(httpx.AsyncClient):
         x402 = x402Client()
         # ... register schemes ...
 
-        async with x402HttpxClient(x402) as client:
-            response = await client.get("https://api.example.com/paid")
+        # Disable SSL verification (e.g. self-signed enclave cert):
+        async with x402HttpxClient(x402, verify=False) as client:
+            response = await client.get("https://enclave-ip:443/paid")
+
+        # Use a custom CA certificate for enclave attestation:
+        async with x402HttpxClient(x402, verify="/path/to/enclave-ca.pem") as client:
+            response = await client.get("https://enclave.example.com/paid")
+
+        # Use a fully custom ssl.SSLContext:
+        import ssl
+        ctx = ssl.create_default_context(cafile="/path/to/enclave-ca.pem")
+        async with x402HttpxClient(x402, verify=ctx) as client:
+            response = await client.get("https://enclave.example.com/paid")
         ```
     """
 
@@ -446,7 +478,16 @@ class x402HttpxClient(httpx.AsyncClient):
         Args:
             x402_client: x402Client or x402HTTPClient for payments.
             **kwargs: Additional arguments for httpx.AsyncClient.
+                The ``verify`` kwarg is extracted and forwarded to the
+                inner ``x402AsyncTransport`` so that the transport used
+                for both the initial request and the payment retry share
+                the same SSL/TLS configuration.
         """
-        # Create payment transport
-        transport = x402AsyncTransport(x402_client)
+        # Extract verify before passing to super — we need it for the
+        # inner transport, and super().__init__ will also use it for
+        # the outer client's default SSL settings.
+        verify: SSLVerifyTypes = kwargs.get("verify", True)
+
+        # Build inner transport with matching SSL config
+        transport = x402AsyncTransport(x402_client, verify=verify)
         super().__init__(transport=transport, **kwargs)

@@ -145,6 +145,22 @@ class x402AsyncTransport(AsyncBaseTransport):
             self._sessions.pop(key, None)
         logger.debug("UPTO_CLIENT_SESSION_CLEAR key=%s", key)
 
+    @staticmethod
+    def _clone_request(
+        request: Request,
+        *,
+        headers: dict[str, str] | None = None,
+        extensions: dict[str, Any] | None = None,
+    ) -> Request:
+        """Clone a request with updated headers and extensions."""
+        return Request(
+            method=request.method,
+            url=request.url,
+            headers=headers if headers is not None else request.headers,
+            content=request.content,
+            extensions=extensions if extensions is not None else request.extensions,
+        )
+
     async def handle_async_request(self, request: Request) -> Response:
         """Handle request with automatic 402 payment retry and session reuse.
 
@@ -172,13 +188,7 @@ class x402AsyncTransport(AsyncBaseTransport):
                 self._session_key(request),
                 session_id,
             )
-            request = Request(
-                method=request.method,
-                url=request.url,
-                headers=new_headers,
-                content=request.content,
-                extensions=request.extensions,
-            )
+            request = self._clone_request(request, headers=new_headers)
 
         # Send the request
         response = await self._transport.handle_async_request(request)
@@ -225,7 +235,19 @@ class x402AsyncTransport(AsyncBaseTransport):
             except json.JSONDecodeError:
                 pass
 
-            payment_required = self._http_client.get_payment_required_response(get_header, body)
+            try:
+                payment_required = self._http_client.get_payment_required_response(get_header, body)
+            except ValueError:
+                if session_id:
+                    logger.debug(
+                        "UPTO_CLIENT_SESSION_STALE key=%s retrying_without_session=true",
+                        self._session_key(request),
+                    )
+                    retry_headers = dict(request.headers)
+                    retry_headers.pop(self.SESSION_HEADER, None)
+                    retry_request = self._clone_request(request, headers=retry_headers)
+                    return await self.handle_async_request(retry_request)
+                raise
 
             # Create payment payload
             payment_payload = await self._client.create_payment_payload(payment_required)
@@ -246,11 +268,9 @@ class x402AsyncTransport(AsyncBaseTransport):
             new_extensions[self.RETRY_KEY] = True
 
             # Create new request
-            retry_request = Request(
-                method=request.method,
-                url=request.url,
+            retry_request = self._clone_request(
+                request,
                 headers=new_headers,
-                content=request.content,
                 extensions=new_extensions,
             )
 

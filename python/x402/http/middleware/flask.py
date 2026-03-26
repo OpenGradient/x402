@@ -1068,6 +1068,7 @@ class PaymentMiddleware:
             tee_signature = "0x"
 
         batch_payload = {
+            "tee_timestamp": tee_timestamp,
             "input_hash": computed_input_hash,
             "output_hash": computed_output_hash,
             "tee_signature": tee_signature,

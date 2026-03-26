@@ -22,6 +22,7 @@ except ImportError as e:
 if TYPE_CHECKING:
     from ...client import x402Client, x402ClientConfig
     from ..x402_http_client import x402HTTPClient
+from ..constants import PAYMENT_SIGNATURE_HEADER, X_PAYMENT_HEADER
 
 # Type alias for httpx's verify parameter: bool, str (CA bundle path), or ssl.SSLContext
 SSLVerifyTypes = Union[bool, str, ssl.SSLContext]
@@ -66,6 +67,7 @@ class x402AsyncTransport(AsyncBaseTransport):
     """
 
     RETRY_KEY = "_x402_is_retry"
+    RECHALLENGE_KEY = "_x402_rechallenge"
     SESSION_HEADER = "X-Upto-Session"
 
     def __init__(
@@ -144,6 +146,17 @@ class x402AsyncTransport(AsyncBaseTransport):
         with self._session_lock:
             self._sessions.pop(key, None)
         logger.debug("UPTO_CLIENT_SESSION_CLEAR key=%s", key)
+
+    def _challenge_request(self, request: Request) -> Request:
+        """Clone a request with cached payment/session headers removed."""
+        headers = dict(request.headers)
+        for header in (self.SESSION_HEADER, PAYMENT_SIGNATURE_HEADER, X_PAYMENT_HEADER):
+            headers.pop(header, None)
+            headers.pop(header.lower(), None)
+
+        extensions = dict(request.extensions)
+        extensions[self.RECHALLENGE_KEY] = True
+        return self._clone_request(request, headers=headers, extensions=extensions)
 
     @staticmethod
     def _clone_request(
@@ -238,14 +251,13 @@ class x402AsyncTransport(AsyncBaseTransport):
             try:
                 payment_required = self._http_client.get_payment_required_response(get_header, body)
             except ValueError:
-                if session_id:
+                if not request.extensions.get(self.RECHALLENGE_KEY):
                     logger.debug(
-                        "UPTO_CLIENT_SESSION_STALE key=%s retrying_without_session=true",
+                        "X402_CLIENT_RECHALLENGE key=%s had_session=%s",
                         self._session_key(request),
+                        bool(session_id),
                     )
-                    retry_headers = dict(request.headers)
-                    retry_headers.pop(self.SESSION_HEADER, None)
-                    retry_request = self._clone_request(request, headers=retry_headers)
+                    retry_request = self._challenge_request(request)
                     return await self.handle_async_request(retry_request)
                 raise
 

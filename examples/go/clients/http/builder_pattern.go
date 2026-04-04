@@ -1,11 +1,11 @@
 package main
 
 import (
-	x402 "github.com/coinbase/x402/go"
-	evm "github.com/coinbase/x402/go/mechanisms/evm/exact/client"
-	svm "github.com/coinbase/x402/go/mechanisms/svm/exact/client"
-	evmsigners "github.com/coinbase/x402/go/signers/evm"
-	svmsigners "github.com/coinbase/x402/go/signers/svm"
+	x402 "github.com/x402-foundation/x402/go"
+	evm "github.com/x402-foundation/x402/go/mechanisms/evm/exact/client"
+	svm "github.com/x402-foundation/x402/go/mechanisms/svm/exact/client"
+	evmsigners "github.com/x402-foundation/x402/go/signers/evm"
+	svmsigners "github.com/x402-foundation/x402/go/signers/svm"
 )
 
 /**
@@ -29,12 +29,12 @@ func createBuilderPatternClient(evmPrivateKey, svmPrivateKey string) (*x402.X402
 	client := x402.Newx402Client()
 
 	// Register EVM scheme for all EVM networks
-	client.Register("eip155:*", evm.NewExactEvmScheme(evmSigner))
+	client.Register("eip155:*", evm.NewExactEvmScheme(evmSigner, nil))
 
 	// You can also register specific networks for fine-grained control
 	// For example, use a different signer for Ethereum mainnet:
 	// ethereumSigner := evmsigners.NewClientSignerFromPrivateKey(ethereumKey)
-	// client.Register("eip155:1", evm.NewExactEvmScheme(ethereumSigner))
+	// client.Register("eip155:1", evm.NewExactEvmScheme(ethereumSigner, nil))
 
 	// Register SVM scheme if key is provided
 	if svmPrivateKey != "" {
@@ -53,4 +53,3 @@ func createBuilderPatternClient(evmPrivateKey, svmPrivateKey string) (*x402.X402
 
 	return client, nil
 }
-

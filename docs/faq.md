@@ -27,21 +27,21 @@ No. Any web API or content provider—crypto or web2—can integrate x402 if it 
 
 Typescript, Python, and Go are reference implementations, but x402 is an **open protocol**.
 
-Nothing prevents you from implementing the spec in Rust, Java, or other languages. If you're interested in building support for your favorite language, please [open an issue](https://github.com/coinbase/x402/issues) and let us know, we'd be happy to help!
+Nothing prevents you from implementing the spec in Rust, Java, or other languages. If you're interested in building support for your favorite language, please [open an issue](https://github.com/x402-foundation/x402/issues) and let us know, we'd be happy to help!
 
 ### Facilitators
 
 #### Who runs facilitators today?
 
-Multiple organizations operate production facilitators. The protocol is **permissionless**—anyone can run a facilitator. See the [x402 Ecosystem](https://www.x402.org/ecosystem?category=facilitators) for available options, including:
+Multiple organizations operate production facilitators. The protocol is **permissionless**—anyone can run a facilitator. See the [x402 Ecosystem](https://www.x402.org/ecosystem?filter=facilitators) for available options, including:
 
 * Community‑run facilitators for various networks and assets
 * Private facilitators for enterprises that need custom KYT / KYC flows.
 
 #### What stops a malicious facilitator from stealing funds or lying about settlement?
 
-Every `x402PaymentPayload` is **signed by the buyer** and settles **directly on‑chain**.\
-A facilitator that tampers with the transaction will fail signature checks.
+Every x402 `PaymentPayload` is **signed by the buyer** and settled **directly on‑chain**.\
+A facilitator that tampers with the transaction would fail signature checks and would **not be able to** settle the transaction.
 
 ### Pricing & Schemes
 
@@ -63,12 +63,12 @@ Yes. x402 handles the _payment execution_. You can still meter usage, aggregate 
 
 | Network        | CAIP-2 ID | Asset | Fees\*   | Status      |
 | -------------- | --------- | ----- | -------- | ----------- |
-| Base           | `eip155:8453` | Any EIP-3009 token  | fee-free | **Mainnet** |
-| Base Sepolia   | `eip155:84532` | Any EIP-3009 token  | fee-free | **Testnet** |
-| Solana         | `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp` | Any SPL token; Token-2022 (v2 only)  | fee-free | **Mainnet** |
-| Solana Devnet  | `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1` | Any SPL token; Token-2022 (v2 only)  | fee-free | **Testnet** |
+| Base           | `eip155:8453` | Any ERC-20 token  | fee-free | **Mainnet** |
+| Base Sepolia   | `eip155:84532` | Any ERC-20 token  | fee-free | **Testnet** |
+| Solana         | `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp` | Any SPL token or Token-2022 token | fee-free | **Mainnet** |
+| Solana Devnet  | `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1` | Any SPL token or Token-2022 | fee-free | **Testnet** |
 
-\* Gas paid on chain; many facilitators offer **zero** facilitator fees (see [ecosystem](https://www.x402.org/ecosystem?category=facilitators) for details).
+\* Gas paid on chain; many facilitators offer **zero** facilitator fees (see [ecosystem](https://www.x402.org/ecosystem?filter=facilitators) for details).
 
 _Support for additional chains and assets is on the roadmap and community‑driven._
 
@@ -105,13 +105,13 @@ Agents follow the same flow as humans:
 
 #### Do agents need wallets?
 
-Yes. Programmatic wallets (e.g., **CDP Wallet API**, **viem**, **ethers‑v6** HD wallets) let agents sign `EIP‑712` payloads without exposing seed phrases.
+Yes. Programmatic wallets (e.g., **CDP Wallet API**, **viem**, **ethers‑v6** HD wallets) let agents sign `EIP‑712` payloads without exposing seed phrases. For Solana-based payments, agents can use **@solana/kit** to sign transactions (see the [Solana buyer quickstart](https://docs.x402.org/getting-started/quickstart-for-buyers#solana-svm) for an example).
 
 ### Governance & Roadmap
 
 #### Is there a formal spec or whitepaper?
 
-* **Spec:** [GitHub Specification](https://github.com/coinbase/x402/tree/main/specs)
+* **Spec:** [GitHub Specification](https://github.com/x402-foundation/x402/tree/main/specs)
 * [**Whitepaper**](https://www.x402.org/x402-whitepaper.pdf)
 
 #### How will x402 evolve?
@@ -119,7 +119,7 @@ Yes. Programmatic wallets (e.g., **CDP Wallet API**, **viem**, **ethers‑v6** H
 Tracked in public GitHub issues + community RFCs. Major themes:
 
 * Multi‑asset support
-* Additional schemes (`upto`, `stream`, `permit2`)
+* Additional schemes (`upto`, `stream`)
 * Discovery layer for service search & reputation
 
 **Why is x402 hosted in the Coinbase GitHub?**
@@ -131,7 +131,7 @@ We acknowledge that the repo is primarily under Coinbase ownership today. This i
 #### I keep getting `402 Payment Required`, even after attaching `PAYMENT-SIGNATURE`. Why?
 
 1. Signature is invalid (wrong chain ID or payload fields).
-2. Payment amount is less than the required `amount` in the payment requirements.
+2. Payment amount does not exactly match the required `amount` in the payment requirements (the exact scheme requires strict equality - no overpayment or underpayment).
 3. Address has insufficient USDC or was flagged by KYT.\
    Check the `error` field in the server's JSON response for details.
 
@@ -144,4 +144,4 @@ We acknowledge that the repo is primarily under Coinbase ownership today. This i
 ### Still have questions?
 
 • Reach out in the [Discord channel](https://discord.gg/invite/cdp)\
-• Open a GitHub Discussion or Issue in the [x402 repo](https://github.com/coinbase/x402)
+• Open a GitHub Discussion or Issue in the [x402 repo](https://github.com/x402-foundation/x402)

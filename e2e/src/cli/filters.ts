@@ -1,12 +1,14 @@
 import { TestScenario } from '../types';
 
 export interface TestFilters {
+  transports?: string[];
   facilitators?: string[];
   servers?: string[];
   clients?: string[];
   extensions?: string[];       // For test output control (doesn't filter scenarios)
   versions?: number[];
   protocolFamilies?: string[];
+  endpoints?: string[];        // Regex patterns to filter by endpoint path
 }
 
 /**
@@ -18,6 +20,14 @@ export function filterScenarios(
   filters: TestFilters
 ): TestScenario[] {
   return scenarios.filter(scenario => {
+    // Transport filter
+    if (filters.transports && filters.transports.length > 0) {
+      const serverTransport = scenario.server.config.transport || 'http';
+      if (!filters.transports.includes(serverTransport)) {
+        return false;
+      }
+    }
+
     // Facilitator filter
     if (filters.facilitators && filters.facilitators.length > 0) {
       const facilitatorName = scenario.facilitator?.name;
@@ -53,6 +63,30 @@ export function filterScenarios(
       if (!filters.protocolFamilies.includes(scenario.protocolFamily)) {
         return false;
       }
+    }
+
+    // Endpoint filter — each entry is treated as a regex pattern.
+    // Patterns are auto-anchored (^...$) so that "/protected" matches only
+    // that exact path. To match a prefix, use "/protected.*"; for a substring
+    // anywhere, use ".*permit2.*" or omit anchors explicitly via ^ / $.
+    if (filters.endpoints && filters.endpoints.length > 0) {
+      const endpointPath = scenario.endpoint.path;
+      const matched = filters.endpoints.some(rawPattern => {
+        // Ensure patterns that look like paths start with /
+        const pattern = (!rawPattern.startsWith('/') && !rawPattern.startsWith('^'))
+          ? `/${rawPattern}`
+          : rawPattern;
+        try {
+          const anchored = (pattern.startsWith('^') || pattern.endsWith('$'))
+            ? pattern
+            : `^${pattern}$`;
+          return new RegExp(anchored).test(endpointPath);
+        } catch {
+          // Fall back to exact match if pattern is not valid regex
+          return endpointPath === pattern;
+        }
+      });
+      if (!matched) return false;
     }
 
     // NOTE: Extensions filter NOT applied - it only controls test output visibility

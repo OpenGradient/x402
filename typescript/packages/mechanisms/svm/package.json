@@ -1,6 +1,6 @@
 {
   "name": "@x402/svm",
-  "version": "2.3.0",
+  "version": "2.9.0",
   "main": "./dist/cjs/index.js",
   "module": "./dist/esm/index.js",
   "types": "./dist/cjs/index.d.ts",
@@ -24,8 +24,8 @@
     "solana"
   ],
   "license": "Apache-2.0",
-  "author": "Coinbase Inc.",
-  "repository": "https://github.com/coinbase/x402",
+  "author": "x402 Foundation",
+  "repository": "https://github.com/x402-foundation/x402",
   "description": "x402 Payment Protocol SVM Implementation",
   "devDependencies": {
     "@eslint/js": "^9.24.0",
@@ -49,8 +49,10 @@
     "@x402/core": "workspace:~",
     "@solana-program/compute-budget": "^0.11.0",
     "@solana-program/token": "^0.9.0",
-    "@solana-program/token-2022": "^0.6.1",
-    "@solana/kit": "^5.1.0"
+    "@solana-program/token-2022": "^0.6.1"
+  },
+  "peerDependencies": {
+    "@solana/kit": ">=5.1.0"
   },
   "exports": {
     ".": {

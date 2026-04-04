@@ -17,6 +17,7 @@ class DiscoveredResource:
         x402_version: int,
         accepts: list[dict[str, Any]],
         discovery_info: dict[str, Any] | None = None,
+        route_template: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
         self.resource = resource
@@ -24,6 +25,7 @@ class DiscoveredResource:
         self.x402_version = x402_version
         self.accepts = accepts
         self.discovery_info = discovery_info
+        self.route_template = route_template
         self.last_updated = datetime.now().isoformat()
         self.metadata = metadata or {}
 
@@ -39,12 +41,13 @@ class DiscoveredResource:
         }
         if self.discovery_info:
             result["discoveryInfo"] = self.discovery_info
+        if self.route_template:
+            result["routeTemplate"] = self.route_template
         return result
 
 
 class BazaarCatalog:
-    """Catalog for storing discovered x402 resources.
-    """
+    """Catalog for storing discovered x402 resources."""
 
     def __init__(self) -> None:
         self._resources: dict[str, DiscoveredResource] = {}
@@ -56,6 +59,7 @@ class BazaarCatalog:
         x402_version: int,
         discovery_info: dict[str, Any] | None,
         payment_requirements: dict[str, Any],
+        route_template: str | None = None,
     ) -> None:
         """Add a discovered resource to the catalog.
 
@@ -65,10 +69,13 @@ class BazaarCatalog:
             x402_version: The x402 protocol version.
             discovery_info: Optional discovery metadata.
             payment_requirements: The payment requirements for this resource.
+            route_template: Optional route template for dynamic routes.
         """
         print(f"📝 Discovered resource: {resource_url}")
         print(f"   Method: {method}")
         print(f"   x402 Version: {x402_version}")
+        if route_template:
+            print(f"   Route template: {route_template}")
 
         self._resources[resource_url] = DiscoveredResource(
             resource=resource_url,
@@ -76,12 +83,11 @@ class BazaarCatalog:
             x402_version=x402_version,
             accepts=[payment_requirements],
             discovery_info=discovery_info,
+            route_template=route_template,
             metadata={},
         )
 
-    def get_resources(
-        self, limit: int = 100, offset: int = 0
-    ) -> dict[str, Any]:
+    def get_resources(self, limit: int = 100, offset: int = 0) -> dict[str, Any]:
         """Get paginated list of discovered resources.
 
         Args:
@@ -108,4 +114,3 @@ class BazaarCatalog:
     def get_count(self) -> int:
         """Get total count of discovered resources."""
         return len(self._resources)
-

@@ -1,11 +1,11 @@
 [project]
-name = "og-x402"
-version = "0.0.1.dev5"
+name = "x402"
+version = "2.6.0"
 description = "x402 Payment Protocol SDK for Python"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
-authors = [{ name = "Coinbase" }]
+authors = [{ name = "x402 Foundation" }]
 keywords = ["x402", "payment", "protocol", "http", "402"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -20,6 +20,7 @@ classifiers = [
 ]
 
 dependencies = [
+    "nest-asyncio>=1.6.0",
     "pydantic>=2.0.0",
     "typing_extensions>=4.0.0",
 ]
@@ -38,7 +39,7 @@ evm = [
     "eth-abi>=5.0.0",
     "eth-keys>=0.5.0",
     "eth-utils>=4.0.0",
-    "eth-account>=0.12.0",
+    "eth-account>=0.13.0",
     "web3>=7.0.0",
 ]
 svm = [
@@ -46,17 +47,17 @@ svm = [
     "solana>=0.36.0",
 ]
 
+# MCP (Model Context Protocol) integration
+mcp = ["mcp>=1.0.0"]
+
 # Extensions - optional functionality
 extensions = ["jsonschema>=4.0.0"]
-
-# Session backends
-redis = ["redis>=5.0.0"]
 
 # Convenience bundles
 clients = ["x402[httpx,requests]"]
 servers = ["x402[flask,fastapi]"]
 mechanisms = ["x402[evm,svm]"]
-all = ["x402[httpx,requests,flask,fastapi,evm,svm,extensions,redis]"]
+all = ["x402[httpx,requests,flask,fastapi,evm,svm,mcp,extensions]"]
 
 [dependency-groups]
 dev = [
@@ -76,22 +77,22 @@ dev = [
     "eth-abi>=5.0.0",
     "eth-keys>=0.5.0",
     "eth-utils>=4.0.0",
-    "eth-account>=0.12.0",
+    "eth-account>=0.13.0",
     "web3>=7.0.0",
     # SVM dependencies
     "solders>=0.27.0",
     "solana>=0.36.0",
+    # MCP dependencies
+    "mcp>=1.26.0",
+    "nest-asyncio>=1.6.0",
     # Extensions dependencies
     "jsonschema>=4.0.0",
-    # Redis session backend
-    "redis>=5.0.0",
-    "fakeredis>=2.0.0",
 ]
 
 [project.urls]
-Homepage = "https://github.com/coinbase/x402"
+Homepage = "https://github.com/x402-foundation/x402"
 Documentation = "https://x402.org"
-Repository = "https://github.com/coinbase/x402"
+Repository = "https://github.com/x402-foundation/x402"
 
 [build-system]
 requires = ["hatchling"]
@@ -119,8 +120,6 @@ exclude = [
 "facilitator.py" = "x402/facilitator.py"
 "facilitator_base.py" = "x402/facilitator_base.py"
 "interfaces.py" = "x402/interfaces.py"
-"session.py" = "x402/session.py"
-"redis_session.py" = "x402/redis_session.py"
 "py.typed" = "x402/py.typed"
 "schemas" = "x402/schemas"
 "http" = "x402/http"
@@ -162,7 +161,7 @@ package = "x402"
 filename = "CHANGELOG.md"
 directory = "changelog.d/"
 title_format = "## [{version}] - {project_date}"
-issue_format = "[#{issue}](https://github.com/coinbase/x402/pull/{issue})"
+issue_format = "[#{issue}](https://github.com/x402-foundation/x402/pull/{issue})"
 
 [tool.towncrier.fragment.feature]
 name = "Added"

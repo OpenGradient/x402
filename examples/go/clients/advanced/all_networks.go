@@ -8,12 +8,12 @@ import (
 	"net/http"
 	"time"
 
-	x402 "github.com/coinbase/x402/go"
-	x402http "github.com/coinbase/x402/go/http"
-	evm "github.com/coinbase/x402/go/mechanisms/evm/exact/client"
-	svm "github.com/coinbase/x402/go/mechanisms/svm/exact/client"
-	evmsigners "github.com/coinbase/x402/go/signers/evm"
-	svmsigners "github.com/coinbase/x402/go/signers/svm"
+	x402 "github.com/x402-foundation/x402/go"
+	x402http "github.com/x402-foundation/x402/go/http"
+	evm "github.com/x402-foundation/x402/go/mechanisms/evm/exact/client"
+	svm "github.com/x402-foundation/x402/go/mechanisms/svm/exact/client"
+	evmsigners "github.com/x402-foundation/x402/go/signers/evm"
+	svmsigners "github.com/x402-foundation/x402/go/signers/svm"
 )
 
 /**
@@ -38,7 +38,7 @@ func runAllNetworksExample(ctx context.Context, evmPrivateKey, svmPrivateKey, ur
 		if err != nil {
 			return fmt.Errorf("failed to create EVM signer: %w", err)
 		}
-		client.Register("eip155:*", evm.NewExactEvmScheme(evmSigner))
+		client.Register("eip155:*", evm.NewExactEvmScheme(evmSigner, nil))
 		fmt.Printf("✅ Registered EVM networks (eip155:*)\n")
 	}
 
@@ -106,7 +106,13 @@ func printPaymentDetails(headers http.Header) {
 	}
 
 	fmt.Println("💰 Payment Details:")
-	fmt.Printf("  Transaction: %s\n", settleResp.Transaction)
+	fmt.Printf("  Success: %v\n", settleResp.Success)
+	if settleResp.ErrorReason != "" {
+		fmt.Printf("  ErrorReason: %s\n", settleResp.ErrorReason)
+	}
+	if settleResp.Transaction != "" {
+		fmt.Printf("  Transaction: %s\n", settleResp.Transaction)
+	}
 	fmt.Printf("  Network: %s\n", settleResp.Network)
 	fmt.Printf("  Payer: %s\n", settleResp.Payer)
 }

@@ -9,9 +9,10 @@ Supports both v2 (extensions in PaymentRequired) and v1 (output_schema in Paymen
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import unquote, urlparse, urlunparse
 
 from .types import (
     BAZAAR,
@@ -38,6 +39,46 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Valid routeTemplate pattern: must start with "/", contain only safe URL path characters
+# and :param identifiers. Expected format: "/users/:userId", "/weather/:country/:city".
+_ROUTE_TEMPLATE_RE = re.compile(r"^/[a-zA-Z0-9_/:.\-~%]+$")
+
+
+def _is_valid_route_template(value: str | None) -> bool:
+    """Check whether a routeTemplate value is structurally valid.
+
+    Expected format: ":param" segments using colon-prefixed identifiers
+    (e.g. "/users/:userId", "/weather/:country/:city").
+
+    The facilitator is a trust boundary: clients control the payment payload and can
+    modify routeTemplate before submission. A malicious value could cause the facilitator
+    to catalog the payment under an arbitrary URL (catalog poisoning).
+
+    Enforces:
+    - Must be a non-empty string starting with "/"
+    - Must match the safe URL path character set (alphanumeric, _, :, /, ., -, ~, %)
+    - Must not contain ".." (path traversal)
+    - Must not contain "://" (URL injection)
+
+    Args:
+        value: The raw routeTemplate string from the client payload.
+
+    Returns:
+        True if the value is a valid routeTemplate, False otherwise.
+    """
+    if not value:
+        return False
+    if not _ROUTE_TEMPLATE_RE.match(value):
+        return False
+    # Decode percent-encoding before traversal checks so that %2e%2e is caught.
+    decoded = unquote(value)
+    if ".." in decoded:
+        return False
+    if "://" in decoded:
+        return False
+    return True
+
+
 @dataclass
 class ValidationResult:
     """Result of validating a discovery extension."""
@@ -56,6 +97,7 @@ class DiscoveredResource:
     discovery_info: DiscoveryInfo
     description: str | None = None
     mime_type: str | None = None
+    route_template: str | None = None
 
 
 @dataclass
@@ -127,8 +169,8 @@ def _get_method_from_info(info: DiscoveryInfo | dict[str, Any]) -> str:
         input_data = info.get("input", {})
         return input_data.get("method", "UNKNOWN")
 
-    if isinstance(info, (QueryDiscoveryInfo, BodyDiscoveryInfo)):
-        if isinstance(info.input, (QueryInput, BodyInput)):
+    if isinstance(info, QueryDiscoveryInfo | BodyDiscoveryInfo):
+        if isinstance(info.input, QueryInput | BodyInput):
             return info.input.method or "UNKNOWN"
 
     return "UNKNOWN"
@@ -177,6 +219,7 @@ def extract_discovery_info(
 
     discovery_info: DiscoveryInfo | None = None
     resource_url: str = ""
+    route_template: str | None = None
     version = payload_dict.get("x402Version", 1)
 
     if version == 2:
@@ -185,10 +228,15 @@ def extract_discovery_info(
         resource_url = resource.get("url", "") if isinstance(resource, dict) else ""
 
         extensions = payload_dict.get("extensions", {})
-        if extensions and BAZAAR in extensions:
-            bazaar_ext = extensions[BAZAAR]
+        if extensions and BAZAAR.key in extensions:
+            bazaar_ext = extensions[BAZAAR.key]
 
             if bazaar_ext and isinstance(bazaar_ext, dict):
+                # routeTemplate uses :param syntax (e.g. "/users/:userId", "/weather/:country/:city").
+                # Must start with "/", must not contain ".." or "://".
+                raw_template = bazaar_ext.get("routeTemplate")
+                if _is_valid_route_template(raw_template):
+                    route_template = raw_template
                 try:
                     extension = parse_discovery_extension(bazaar_ext)
 
@@ -223,7 +271,11 @@ def extract_discovery_info(
     method = _get_method_from_info(discovery_info)
     # Strip query params (?) and hash sections (#) for discovery cataloging
     parsed = urlparse(resource_url)
-    normalized_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+    # If a routeTemplate is present (dynamic route), use it as the canonical path
+    if route_template:
+        normalized_url = urlunparse((parsed.scheme, parsed.netloc, route_template, "", "", ""))
+    else:
+        normalized_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
 
     # Extract description and mime_type from resource info (V2) or requirements (V1)
     description: str | None = None
@@ -247,6 +299,7 @@ def extract_discovery_info(
         discovery_info=discovery_info,
         description=description,
         mime_type=mime_type,
+        route_template=route_template,
     )
 
 

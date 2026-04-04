@@ -2,10 +2,29 @@ package types
 
 import (
 	"encoding/json"
+	"regexp"
+
+	x402 "github.com/x402-foundation/x402/go"
 )
 
-// Extension identifier constant for the Bazaar discovery extension
-const BAZAAR = "bazaar"
+// BAZAAR is the extension identifier for the Bazaar discovery extension.
+var BAZAAR = x402.NewFacilitatorExtension("bazaar")
+
+// ColonParamRegex matches :paramName route segments (Express style).
+// Shared across http/server.go and extensions/bazaar/server.go to avoid drift.
+var ColonParamRegex = regexp.MustCompile(`:([a-zA-Z_][a-zA-Z0-9_]*)`)
+
+// Extension identifier constant for the Payment Identifier extension
+const PAYMENT_IDENTIFIER = "payment-identifier"
+
+// Payment identifier validation constants
+const (
+	PAYMENT_ID_MIN_LENGTH = 16
+	PAYMENT_ID_MAX_LENGTH = 128
+)
+
+// PAYMENT_ID_PATTERN is a regex pattern for valid payment identifier characters
+var PAYMENT_ID_PATTERN = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 // QueryParamMethods are HTTP methods that use query parameters
 type QueryParamMethods string
@@ -45,6 +64,7 @@ type QueryInput struct {
 	Type        string                 `json:"type"` // "http"
 	Method      QueryParamMethods      `json:"method"`
 	QueryParams map[string]interface{} `json:"queryParams,omitempty"`
+	PathParams  map[string]interface{} `json:"pathParams,omitempty"`
 	Headers     map[string]string      `json:"headers,omitempty"`
 }
 
@@ -61,6 +81,7 @@ type BodyInput struct {
 	BodyType    BodyType               `json:"bodyType"`
 	Body        interface{}            `json:"body"`
 	QueryParams map[string]interface{} `json:"queryParams,omitempty"`
+	PathParams  map[string]interface{} `json:"pathParams,omitempty"`
 	Headers     map[string]string      `json:"headers,omitempty"`
 }
 
@@ -130,8 +151,9 @@ type BodyDiscoveryExtension struct {
 
 // DiscoveryExtension is a union type that can be either Query or Body discovery extension
 type DiscoveryExtension struct {
-	Info   DiscoveryInfo `json:"info"`
-	Schema JSONSchema    `json:"schema"`
+	Info          DiscoveryInfo `json:"info"`
+	Schema        JSONSchema    `json:"schema"`
+	RouteTemplate string        `json:"routeTemplate,omitempty"`
 }
 
 // DeclareQueryDiscoveryConfig is the configuration for declaring a query discovery extension

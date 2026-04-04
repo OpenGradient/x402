@@ -403,7 +403,7 @@ class x402ResourceServerSync(x402ResourceServerBase):
 
     def __init__(
         self,
-        facilitator_clients: FacilitatorClientSync | list[FacilitatorClientSync] | None = None,
+        facilitator_clients: (FacilitatorClientSync | list[FacilitatorClientSync] | None) = None,
     ) -> None:
         """Initialize sync x402ResourceServer."""
         # Runtime validation - catch mismatched sync/async early

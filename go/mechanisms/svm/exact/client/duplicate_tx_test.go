@@ -12,13 +12,13 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/coinbase/x402/go/mechanisms/svm"
-	"github.com/coinbase/x402/go/types"
 	bin "github.com/gagliardetto/binary"
 	solana "github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/programs/token"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/x402-foundation/x402/go/mechanisms/svm"
+	"github.com/x402-foundation/x402/go/types"
 )
 
 const (
@@ -368,13 +368,6 @@ func TestAttackScenarioSimulation(t *testing.T) {
 		assert.Greater(t, requestsPerSlot, 1,
 			"Multiple requests (%d) can arrive within a single slot", requestsPerSlot)
 	})
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 func TestMemoDataIsValidUTF8(t *testing.T) {

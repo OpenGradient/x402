@@ -10,6 +10,18 @@
     1,
     2
   ],
+  "schemes": ["exact", "upto"],
+  "evm": {
+    "transferMethods": [
+      "eip3009",
+      "permit2",
+      "upto"
+    ]
+  },
+  "extensions": [
+    "eip2612GasSponsoring",
+    "erc20ApprovalGasSponsoring"
+  ],
   "environment": {
     "required": [
       "EVM_PRIVATE_KEY",
@@ -17,6 +29,8 @@
       "RESOURCE_SERVER_URL",
       "ENDPOINT_PATH"
     ],
-    "optional": []
+    "optional": [
+      "EVM_RPC_URL"
+    ]
   }
 }

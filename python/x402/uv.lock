@@ -886,20 +886,6 @@ wheels = [
 ]
 
 [[package]]
-name = "fakeredis"
-version = "2.33.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "redis" },
-    { name = "sortedcontainers" },
-    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/5f/f9/57464119936414d60697fcbd32f38909bb5688b616ae13de6e98384433e0/fakeredis-2.33.0.tar.gz", hash = "sha256:d7bc9a69d21df108a6451bbffee23b3eba432c21a654afc7ff2d295428ec5770", size = 175187, upload-time = "2025-12-16T19:45:52.269Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/6e/78/a850fed8aeef96d4a99043c90b818b2ed5419cd5b24a4049fd7cfb9f1471/fakeredis-2.33.0-py3-none-any.whl", hash = "sha256:de535f3f9ccde1c56672ab2fdd6a8efbc4f2619fc2f1acc87b8737177d71c965", size = 119605, upload-time = "2025-12-16T19:45:51.08Z" },
-]
-
-[[package]]
 name = "fastapi"
 version = "0.128.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1762,134 +1748,6 @@ wheels = [
 ]
 
 [[package]]
-name = "og-test-v2-x402"
-version = "0.0.2"
-source = { editable = "." }
-dependencies = [
-    { name = "pydantic" },
-    { name = "typing-extensions" },
-]
-
-[package.optional-dependencies]
-all = [
-    { name = "x402", extra = ["evm", "extensions", "fastapi", "flask", "httpx", "requests", "svm"] },
-]
-clients = [
-    { name = "x402", extra = ["httpx", "requests"] },
-]
-evm = [
-    { name = "eth-abi" },
-    { name = "eth-account" },
-    { name = "eth-keys" },
-    { name = "eth-utils" },
-    { name = "web3" },
-]
-extensions = [
-    { name = "jsonschema" },
-]
-fastapi = [
-    { name = "fastapi", extra = ["standard"] },
-    { name = "starlette" },
-]
-flask = [
-    { name = "flask" },
-]
-httpx = [
-    { name = "httpx" },
-]
-mechanisms = [
-    { name = "x402", extra = ["evm", "svm"] },
-]
-redis = [
-    { name = "redis" },
-]
-requests = [
-    { name = "requests" },
-]
-servers = [
-    { name = "x402", extra = ["fastapi", "flask"] },
-]
-svm = [
-    { name = "solana" },
-    { name = "solders" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "black" },
-    { name = "eth-abi" },
-    { name = "eth-account" },
-    { name = "eth-keys" },
-    { name = "eth-utils" },
-    { name = "fakeredis" },
-    { name = "fastapi", extra = ["standard"] },
-    { name = "flask" },
-    { name = "httpx" },
-    { name = "jsonschema" },
-    { name = "mypy" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "redis" },
-    { name = "requests" },
-    { name = "ruff" },
-    { name = "solana" },
-    { name = "solders" },
-    { name = "starlette" },
-    { name = "towncrier" },
-    { name = "web3" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "eth-abi", marker = "extra == 'evm'", specifier = ">=5.0.0" },
-    { name = "eth-account", marker = "extra == 'evm'", specifier = ">=0.12.0" },
-    { name = "eth-keys", marker = "extra == 'evm'", specifier = ">=0.5.0" },
-    { name = "eth-utils", marker = "extra == 'evm'", specifier = ">=4.0.0" },
-    { name = "fastapi", extras = ["standard"], marker = "extra == 'fastapi'", specifier = ">=0.115.0" },
-    { name = "flask", marker = "extra == 'flask'", specifier = ">=3.0.0" },
-    { name = "httpx", marker = "extra == 'httpx'", specifier = ">=0.28.1" },
-    { name = "jsonschema", marker = "extra == 'extensions'", specifier = ">=4.0.0" },
-    { name = "pydantic", specifier = ">=2.0.0" },
-    { name = "redis", marker = "extra == 'redis'", specifier = ">=5.0.0" },
-    { name = "requests", marker = "extra == 'requests'", specifier = ">=2.31.0" },
-    { name = "solana", marker = "extra == 'svm'", specifier = ">=0.36.0" },
-    { name = "solders", marker = "extra == 'svm'", specifier = ">=0.27.0" },
-    { name = "starlette", marker = "extra == 'fastapi'", specifier = ">=0.27.0" },
-    { name = "typing-extensions", specifier = ">=4.0.0" },
-    { name = "web3", marker = "extra == 'evm'", specifier = ">=7.0.0" },
-    { name = "x402", extras = ["evm", "svm"], marker = "extra == 'mechanisms'" },
-    { name = "x402", extras = ["flask", "fastapi"], marker = "extra == 'servers'" },
-    { name = "x402", extras = ["httpx", "requests"], marker = "extra == 'clients'" },
-    { name = "x402", extras = ["httpx", "requests", "flask", "fastapi", "evm", "svm", "extensions", "redis"], marker = "extra == 'all'" },
-]
-provides-extras = ["httpx", "requests", "flask", "fastapi", "evm", "svm", "extensions", "redis", "clients", "servers", "mechanisms", "all"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "black", specifier = ">=23.0.0" },
-    { name = "eth-abi", specifier = ">=5.0.0" },
-    { name = "eth-account", specifier = ">=0.12.0" },
-    { name = "eth-keys", specifier = ">=0.5.0" },
-    { name = "eth-utils", specifier = ">=4.0.0" },
-    { name = "fakeredis", specifier = ">=2.0.0" },
-    { name = "fastapi", extras = ["standard"], specifier = ">=0.115.0" },
-    { name = "flask", specifier = ">=3.0.0" },
-    { name = "httpx", specifier = ">=0.28.1" },
-    { name = "jsonschema", specifier = ">=4.0.0" },
-    { name = "mypy", specifier = ">=1.0.0" },
-    { name = "pytest", specifier = ">=7.0.0" },
-    { name = "pytest-asyncio", specifier = ">=0.21.0" },
-    { name = "redis", specifier = ">=5.0.0" },
-    { name = "requests", specifier = ">=2.31.0" },
-    { name = "ruff", specifier = ">=0.1.0" },
-    { name = "solana", specifier = ">=0.36.0" },
-    { name = "solders", specifier = ">=0.27.0" },
-    { name = "starlette", specifier = ">=0.27.0" },
-    { name = "towncrier", specifier = ">=24.8.0,<25" },
-    { name = "web3", specifier = ">=7.0.0" },
-]
-
-[[package]]
 name = "packaging"
 version = "25.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2415,18 +2273,6 @@ wheels = [
 ]
 
 [[package]]
-name = "redis"
-version = "7.1.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "async-timeout", marker = "python_full_version < '3.11.3'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/f7/80/2971931d27651affa88a44c0ad7b8c4a19dc29c998abb20b23868d319b59/redis-7.1.1.tar.gz", hash = "sha256:a2814b2bda15b39dad11391cc48edac4697214a8a5a4bd10abe936ab4892eb43", size = 4800064, upload-time = "2026-02-09T18:39:40.292Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/29/55/1de1d812ba1481fa4b37fb03b4eec0fcb71b6a0d44c04ea3482eb017600f/redis-7.1.1-py3-none-any.whl", hash = "sha256:f77817f16071c2950492c67d40b771fa493eb3fccc630a424a10976dbb794b7a", size = 356057, upload-time = "2026-02-09T18:39:38.602Z" },
-]
-
-[[package]]
 name = "referencing"
 version = "0.37.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2929,15 +2775,6 @@ wheels = [
 ]
 
 [[package]]
-name = "sortedcontainers"
-version = "2.4.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/e8/c4/ba2f8066cceb6f23394729afe52f3bf7adec04bf9ed2c820b39e19299111/sortedcontainers-2.4.0.tar.gz", hash = "sha256:25caa5a06cc30b6b83d11423433f65d1f9d76c4c6a0c90e3379eaa43b9bfdb88", size = 30594, upload-time = "2021-05-16T22:03:42.897Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/32/46/9cb0e58b2deb7f82b84065f37f3bffeb12413f947f9388e4cac22c4621ce/sortedcontainers-2.4.0-py2.py3-none-any.whl", hash = "sha256:a163dcaede0f1c021485e957a39245190e74249897e2ae4b2aa38595db237ee0", size = 29575, upload-time = "2021-05-16T22:03:41.177Z" },
-]
-
-[[package]]
 name = "starlette"
 version = "0.50.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3350,17 +3187,32 @@ wheels = [
 [[package]]
 name = "x402"
 version = "2.0.0"
-source = { registry = "https://pypi.org/simple" }
+source = { editable = "." }
 dependencies = [
     { name = "pydantic" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/01/e1/b3d1c79afa25513d51ae1d9379c178eb2b4f1eb8b1b73a4207cfba7a91ea/x402-2.0.0.tar.gz", hash = "sha256:ba458b81f3889c0de5f140549998e32b1dfac36eee15f52ebc8035bb7c6c4958", size = 866901, upload-time = "2026-01-22T00:51:08.382Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/63/82/fb15d27f1cf45d2e3fee17340672d38631df482f1be11029d5b4c2f72097/x402-2.0.0-py3-none-any.whl", hash = "sha256:9db08530b9daa0a00d8505f7cd0bddf45a27ff8948d11bb9961d324d10b91a50", size = 917873, upload-time = "2026-01-22T00:51:06.943Z" },
-]
 
 [package.optional-dependencies]
+all = [
+    { name = "eth-abi" },
+    { name = "eth-account" },
+    { name = "eth-keys" },
+    { name = "eth-utils" },
+    { name = "fastapi", extra = ["standard"] },
+    { name = "flask" },
+    { name = "httpx" },
+    { name = "jsonschema" },
+    { name = "requests" },
+    { name = "solana" },
+    { name = "solders" },
+    { name = "starlette" },
+    { name = "web3" },
+]
+clients = [
+    { name = "httpx" },
+    { name = "requests" },
+]
 evm = [
     { name = "eth-abi" },
     { name = "eth-account" },
@@ -3381,12 +3233,96 @@ flask = [
 httpx = [
     { name = "httpx" },
 ]
+mechanisms = [
+    { name = "eth-abi" },
+    { name = "eth-account" },
+    { name = "eth-keys" },
+    { name = "eth-utils" },
+    { name = "solana" },
+    { name = "solders" },
+    { name = "web3" },
+]
 requests = [
     { name = "requests" },
+]
+servers = [
+    { name = "fastapi", extra = ["standard"] },
+    { name = "flask" },
+    { name = "starlette" },
 ]
 svm = [
     { name = "solana" },
     { name = "solders" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "black" },
+    { name = "eth-abi" },
+    { name = "eth-account" },
+    { name = "eth-keys" },
+    { name = "eth-utils" },
+    { name = "fastapi", extra = ["standard"] },
+    { name = "flask" },
+    { name = "httpx" },
+    { name = "jsonschema" },
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "requests" },
+    { name = "ruff" },
+    { name = "solana" },
+    { name = "solders" },
+    { name = "starlette" },
+    { name = "towncrier" },
+    { name = "web3" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "eth-abi", marker = "extra == 'evm'", specifier = ">=5.0.0" },
+    { name = "eth-account", marker = "extra == 'evm'", specifier = ">=0.12.0" },
+    { name = "eth-keys", marker = "extra == 'evm'", specifier = ">=0.5.0" },
+    { name = "eth-utils", marker = "extra == 'evm'", specifier = ">=4.0.0" },
+    { name = "fastapi", extras = ["standard"], marker = "extra == 'fastapi'", specifier = ">=0.115.0" },
+    { name = "flask", marker = "extra == 'flask'", specifier = ">=3.0.0" },
+    { name = "httpx", marker = "extra == 'httpx'", specifier = ">=0.28.1" },
+    { name = "jsonschema", marker = "extra == 'extensions'", specifier = ">=4.0.0" },
+    { name = "pydantic", specifier = ">=2.0.0" },
+    { name = "requests", marker = "extra == 'requests'", specifier = ">=2.31.0" },
+    { name = "solana", marker = "extra == 'svm'", specifier = ">=0.36.0" },
+    { name = "solders", marker = "extra == 'svm'", specifier = ">=0.27.0" },
+    { name = "starlette", marker = "extra == 'fastapi'", specifier = ">=0.27.0" },
+    { name = "typing-extensions", specifier = ">=4.0.0" },
+    { name = "web3", marker = "extra == 'evm'", specifier = ">=7.0.0" },
+    { name = "x402", extras = ["evm", "svm"], marker = "extra == 'mechanisms'" },
+    { name = "x402", extras = ["flask", "fastapi"], marker = "extra == 'servers'" },
+    { name = "x402", extras = ["httpx", "requests"], marker = "extra == 'clients'" },
+    { name = "x402", extras = ["httpx", "requests", "flask", "fastapi", "evm", "svm", "extensions"], marker = "extra == 'all'" },
+]
+provides-extras = ["httpx", "requests", "flask", "fastapi", "evm", "svm", "extensions", "clients", "servers", "mechanisms", "all"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "black", specifier = ">=23.0.0" },
+    { name = "eth-abi", specifier = ">=5.0.0" },
+    { name = "eth-account", specifier = ">=0.12.0" },
+    { name = "eth-keys", specifier = ">=0.5.0" },
+    { name = "eth-utils", specifier = ">=4.0.0" },
+    { name = "fastapi", extras = ["standard"], specifier = ">=0.115.0" },
+    { name = "flask", specifier = ">=3.0.0" },
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "jsonschema", specifier = ">=4.0.0" },
+    { name = "mypy", specifier = ">=1.0.0" },
+    { name = "pytest", specifier = ">=7.0.0" },
+    { name = "pytest-asyncio", specifier = ">=0.21.0" },
+    { name = "requests", specifier = ">=2.31.0" },
+    { name = "ruff", specifier = ">=0.1.0" },
+    { name = "solana", specifier = ">=0.36.0" },
+    { name = "solders", specifier = ">=0.27.0" },
+    { name = "starlette", specifier = ">=0.27.0" },
+    { name = "towncrier", specifier = ">=24.8.0,<25" },
+    { name = "web3", specifier = ">=7.0.0" },
 ]
 
 [[package]]

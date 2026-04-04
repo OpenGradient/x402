@@ -16,6 +16,7 @@ import type {
 // ============================================================================
 
 interface MockResourceServer {
+  findMatchingRequirements: ReturnType<typeof vi.fn>;
   verifyPayment: ReturnType<typeof vi.fn>;
   settlePayment: ReturnType<typeof vi.fn>;
   createPaymentRequiredResponse: ReturnType<typeof vi.fn>;
@@ -82,6 +83,7 @@ const mockPaymentRequired = {
  */
 function createMockResourceServer(): MockResourceServer {
   return {
+    findMatchingRequirements: vi.fn().mockReturnValue(mockPaymentRequirements),
     verifyPayment: vi.fn().mockResolvedValue(mockVerifyResponse),
     settlePayment: vi.fn().mockResolvedValue(mockSettleResponse),
     createPaymentRequiredResponse: vi.fn().mockResolvedValue(mockPaymentRequired),
@@ -166,6 +168,31 @@ describe("createPaymentWrapper", () => {
         mockPaymentPayload,
         mockPaymentRequirements,
       );
+    });
+
+    it("should preserve structuredContent from handler result", async () => {
+      const paid = createPaymentWrapper(
+        mockResourceServer as unknown as Parameters<typeof createPaymentWrapper>[0],
+        {
+          accepts: [mockPaymentRequirements],
+        },
+      );
+
+      const structuredData = { query: "test", results: [{ id: 1 }], count: 1 };
+      const handler = vi.fn().mockResolvedValue({
+        content: [{ type: "text", text: JSON.stringify(structuredData) }],
+        structuredContent: structuredData,
+      });
+
+      const wrappedHandler = paid(handler);
+      const result = await wrappedHandler(
+        { test: "arg" },
+        { _meta: { "x402/payment": mockPaymentPayload } },
+      );
+
+      expect(result.structuredContent).toEqual(structuredData);
+      expect(result.content).toEqual([{ type: "text", text: JSON.stringify(structuredData) }]);
+      expect(result._meta?.[MCP_PAYMENT_RESPONSE_META_KEY]).toEqual(mockSettleResponse);
     });
 
     it("should not settle payment if tool returns error", async () => {

@@ -10,8 +10,65 @@
 import Ajv from "ajv/dist/2020.js";
 import type { PaymentPayload, PaymentRequirements, PaymentRequirementsV1 } from "@x402/core/types";
 import type { DiscoveryExtension, DiscoveryInfo } from "./types";
+import type { McpDiscoveryInfo } from "./mcp/types";
+import type { DiscoveredHTTPResource } from "./http/types";
+import type { DiscoveredMCPResource } from "./mcp/types";
 import { BAZAAR } from "./types";
 import { extractDiscoveryInfoV1 } from "./v1/facilitator";
+
+/**
+ * Valid routeTemplate pattern: must start with "/", contain only safe URL path characters
+ * and :param identifiers, and not include traversal sequences or scheme markers.
+ *
+ * Allowed: /users/:userId, /weather/:country/:city, /api/v1/items
+ */
+const ROUTE_TEMPLATE_REGEX = /^\/[a-zA-Z0-9_/:.\-~%]+$/;
+
+/**
+ * Checks whether a routeTemplate value is structurally valid.
+ *
+ * Expected format: "/:param" segments using colon-prefixed identifiers
+ * (e.g. "/users/:userId", "/weather/:country/:city").
+ *
+ * The facilitator is a trust boundary: clients control the payment payload and
+ * can modify routeTemplate before submission. A malicious value could cause the
+ * facilitator to catalog the payment under an arbitrary URL (catalog poisoning).
+ * This function enforces minimal structural requirements:
+ * - Must be a non-empty string starting with "/"
+ * - Must match the safe URL path character set (alphanumeric, _, :, /, ., -, ~, %)
+ * - Must not contain ".." (path traversal)
+ * - Must not contain "://" (URL injection)
+ *
+ * @param value - The raw routeTemplate string from the client payload
+ * @returns true if the value is a valid routeTemplate, false otherwise
+ *
+ * @internal Exported for facilitator use.
+ */
+export function isValidRouteTemplate(value: string | undefined): value is string {
+  if (!value) return false;
+  if (!ROUTE_TEMPLATE_REGEX.test(value)) return false;
+  // Decode percent-encoding before traversal checks so that %2e%2e is caught.
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(value);
+  } catch {
+    return false;
+  }
+  if (decoded.includes("..")) return false;
+  if (decoded.includes("://")) return false;
+  return true;
+}
+
+/**
+ * Validates a routeTemplate and returns it if valid, undefined otherwise.
+ *
+ * @param value - The raw routeTemplate string to validate
+ * @returns The validated value, or undefined if invalid
+ * @deprecated Use `isValidRouteTemplate` instead.
+ */
+export function validateRouteTemplate(value: string | undefined): string | undefined {
+  return isValidRouteTemplate(value) ? value : undefined;
+}
 
 /**
  * Validation result for discovery extensions
@@ -99,14 +156,10 @@ export function validateDiscoveryExtension(extension: DiscoveryExtension): Valid
  * }
  * ```
  */
-export interface DiscoveredResource {
-  resourceUrl: string;
-  description?: string;
-  mimeType?: string;
-  method: string;
-  x402Version: number;
-  discoveryInfo: DiscoveryInfo;
-}
+export type { DiscoveredHTTPResource } from "./http/types";
+export type { DiscoveredMCPResource } from "./mcp/types";
+
+export type DiscoveredResource = DiscoveredHTTPResource | DiscoveredMCPResource;
 
 /**
  * Extracts discovery information from payment payload and requirements.
@@ -125,14 +178,25 @@ export function extractDiscoveryInfo(
   let discoveryInfo: DiscoveryInfo | null = null;
   let resourceUrl: string;
 
+  let routeTemplate: string | undefined;
+
   if (paymentPayload.x402Version === 2) {
     resourceUrl = paymentPayload.resource?.url ?? "";
 
     if (paymentPayload.extensions) {
-      const bazaarExtension = paymentPayload.extensions[BAZAAR];
+      const bazaarExtension = paymentPayload.extensions[BAZAAR.key];
 
       if (bazaarExtension && typeof bazaarExtension === "object") {
         try {
+          // routeTemplate uses :param syntax (e.g. "/users/:userId", "/weather/:country/:city").
+          // Must start with "/", must not contain ".." or "://".
+          // Validate before use: the client controls this field in the payment payload.
+          const rawExt = bazaarExtension as Record<string, unknown>;
+          const rawTemplate =
+            typeof rawExt.routeTemplate === "string" ? rawExt.routeTemplate : undefined;
+          if (isValidRouteTemplate(rawTemplate)) {
+            routeTemplate = rawTemplate;
+          }
           const extension = bazaarExtension as DiscoveryExtension;
 
           if (validate) {
@@ -166,7 +230,10 @@ export function extractDiscoveryInfo(
 
   // Strip query params (?) and hash sections (#) for discovery cataloging
   const url = new URL(resourceUrl);
-  const normalizedResourceUrl = `${url.origin}${url.pathname}`;
+  // If a routeTemplate is present (dynamic route), use it as the canonical path
+  const canonicalUrl = routeTemplate
+    ? `${url.origin}${routeTemplate}`
+    : `${url.origin}${url.pathname}`;
 
   // Extract description and mimeType from resource info (v2) or requirements (v1)
   let description: string | undefined;
@@ -181,14 +248,20 @@ export function extractDiscoveryInfo(
     mimeType = requirementsV1.mimeType;
   }
 
-  return {
-    resourceUrl: normalizedResourceUrl,
+  const base = {
+    resourceUrl: canonicalUrl,
     description,
     mimeType,
-    method: discoveryInfo.input.method,
     x402Version: paymentPayload.x402Version,
     discoveryInfo,
   };
+
+  if (discoveryInfo.input.type === "mcp") {
+    // MCP routes are not parameterized; routeTemplate is not applicable.
+    return { ...base, toolName: (discoveryInfo as McpDiscoveryInfo).input.toolName };
+  }
+
+  return { ...base, routeTemplate, method: discoveryInfo.input.method };
 }
 
 /**

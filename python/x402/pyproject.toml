@@ -1,6 +1,6 @@
 [project]
-name = "x402"
-version = "2.6.0"
+name = "og-x402"
+version = "0.0.1.dev9"
 description = "x402 Payment Protocol SDK for Python"
 readme = "README.md"
 license = { text = "MIT" }
@@ -120,9 +120,12 @@ exclude = [
 "facilitator.py" = "x402/facilitator.py"
 "facilitator_base.py" = "x402/facilitator_base.py"
 "interfaces.py" = "x402/interfaces.py"
+"session.py" = "x402/session.py"
+"redis_session.py" = "x402/redis_session.py"
 "py.typed" = "x402/py.typed"
 "schemas" = "x402/schemas"
 "http" = "x402/http"
+"mcp" = "x402/mcp"
 "mechanisms" = "x402/mechanisms"
 "extensions" = "x402/extensions"
 

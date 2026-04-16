@@ -156,7 +156,7 @@ class x402Client(x402ClientBase):
             return await self._create_payment_payload_v2(
                 payment_required,  # type: ignore[arg-type]
                 resource,
-                extensions,
+                payment_required.extensions,
             )
 
     async def _create_payment_payload_v2(

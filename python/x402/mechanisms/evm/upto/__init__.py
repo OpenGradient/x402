@@ -5,7 +5,7 @@ which uses Permit2 with session-based spend caps.
 """
 
 from .client import UptoEvmScheme
-from .facilitator import UptoEvmFacilitatorScheme
+from .facilitator import UptoEvmScheme as UptoEvmFacilitatorScheme
 from .register import (
     register_upto_evm_client,
     register_upto_evm_facilitator,

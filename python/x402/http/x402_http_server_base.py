@@ -18,6 +18,7 @@ from ..schemas import (
     PaymentRequired,
     PaymentRequirements,
     ResourceInfo,
+    SettlementOverrides,
     SettleResponse,
 )
 from ..schemas.errors import SettleError
@@ -426,6 +427,7 @@ class x402HTTPServerBase:
         payment_payload: PaymentPayload | PaymentPayloadV1,
         requirements: PaymentRequirements,
         context: HTTPRequestContext | None = None,
+        settlement_overrides: SettlementOverrides | None = None,
     ) -> ProcessSettleResult:
         """Process settlement after successful response.
 
@@ -441,12 +443,18 @@ class x402HTTPServerBase:
         Returns:
             ProcessSettleResult with headers if success, or response if failure.
         """
+        logger.info(
+            "PROCESS_SETTLEMENT: scheme=%s network=%s amount=%s overrides=%s",
+            getattr(requirements, "scheme", "?"),
+            getattr(requirements, "network", "?"),
+            getattr(requirements, "amount", "?"),
+            settlement_overrides,
+        )
         try:
             settle_response = self._server.settle_payment(
                 payment_payload,
                 requirements,
-                settlement_type=settlement_type,
-                settlement_data=settlement_data,
+                settlement_overrides,
             )
 
             if not settle_response.success:
@@ -457,6 +465,7 @@ class x402HTTPServerBase:
                     transaction=settle_response.transaction,
                     network=settle_response.network,
                     payer=settle_response.payer,
+                    amount=settle_response.amount,
                 )
                 failure.response = self._build_settlement_failure_response(failure, context)
                 return failure
@@ -467,6 +476,7 @@ class x402HTTPServerBase:
                 transaction=settle_response.transaction,
                 network=settle_response.network,
                 payer=settle_response.payer,
+                amount=settle_response.amount,
             )
 
         except SettleError as e:
@@ -485,6 +495,7 @@ class x402HTTPServerBase:
                 transaction=settle_response.transaction,
                 network=settle_response.network,
                 payer=settle_response.payer,
+                amount=settle_response.amount,
             )
             failure.response = self._build_settlement_failure_response(failure, context)
             return failure
@@ -500,6 +511,13 @@ class x402HTTPServerBase:
         settlement_data: str | None = None,
     ) -> ProcessSettleResult:
         """Submit settlement data side-channel independently from settlement."""
+        logger.info(
+            "PROCESS_SETTLEMENT_DATA: type=%s data_len=%d scheme=%s network=%s",
+            settlement_type,
+            len(settlement_data) if settlement_data else 0,
+            getattr(requirements, "scheme", "?"),
+            getattr(requirements, "network", "?"),
+        )
         try:
             self._server.submit_settlement_data(
                 payment_payload,
@@ -507,6 +525,7 @@ class x402HTTPServerBase:
                 settlement_type=settlement_type,
                 settlement_data=settlement_data,
             )
+            logger.info("PROCESS_SETTLEMENT_DATA: success")
             return ProcessSettleResult(success=True)
         except Exception as e:
             settle_response = SettleResponse(
@@ -522,8 +541,9 @@ class x402HTTPServerBase:
                 headers=self._create_settlement_headers(settle_response, requirements),
                 transaction="",
                 network=requirements.network,
+                amount=settle_response.amount,
             )
-            failure.response = self._build_settlement_failure_response(failure, context)
+            failure.response = self._build_settlement_failure_response(failure, None)
             return failure
 
     # =========================================================================

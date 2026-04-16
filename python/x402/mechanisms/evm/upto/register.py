@@ -25,6 +25,8 @@ def register_upto_evm_client(
     signer: "ClientEvmSigner",
     networks: str | list[str] | None = None,
     policies: list | None = None,
+    rpc_url: str | None = None,
+    rpc_by_chain_id: dict[int, str] | None = None,
 ) -> ClientT:
     """Register EVM upto payment scheme to x402Client.
 
@@ -33,13 +35,25 @@ def register_upto_evm_client(
         signer: EVM signer for payment authorizations.
         networks: Optional specific network(s) (default: wildcard).
         policies: Optional payment policies.
+        rpc_url: Optional fallback RPC URL for on-chain reads (nonces,
+            allowances). Required for EIP-2612 gas sponsoring when the
+            signer lacks ``read_contract`` capability.
+        rpc_by_chain_id: Optional per-chain RPC URLs keyed by chain ID.
 
     Returns:
         Client for chaining.
     """
     from .client import UptoEvmScheme
+    from .client.rpc import UptoEvmSchemeConfig
 
-    scheme = UptoEvmScheme(signer)
+    config: UptoEvmSchemeConfig | None = None
+    if rpc_url or rpc_by_chain_id:
+        config = UptoEvmSchemeConfig(
+            rpc_url=rpc_url,
+            rpc_by_chain_id=rpc_by_chain_id or {},
+        )
+
+    scheme = UptoEvmScheme(signer, config=config)
 
     if networks:
         if isinstance(networks, str):

@@ -28,6 +28,7 @@ from ..types import (
     RoutesConfig,
 )
 from ..x402_http_server import PaywallProvider, x402HTTPResourceServer
+from ...schemas import SettlementOverrides
 
 if TYPE_CHECKING:
     from ...server import x402ResourceServer
@@ -184,6 +185,16 @@ class FastAPIAdapter(HTTPAdapter):
         return None  # Body requires async access
 
 
+def set_settlement_overrides(request: Request, overrides: SettlementOverrides | None) -> None:
+    """Store settlement overrides on a FastAPI request."""
+    request.state.x402_settlement_overrides = overrides
+
+
+def get_settlement_overrides(request: Request) -> SettlementOverrides | None:
+    """Read settlement overrides previously stored on the request."""
+    return getattr(request.state, "x402_settlement_overrides", None)
+
+
 # ============================================================================
 # Middleware Implementation
 # ============================================================================
@@ -328,6 +339,7 @@ def payment_middleware(
             # Store payment info in request state
             request.state.payment_payload = result.payment_payload
             request.state.payment_requirements = result.payment_requirements
+            request.state.x402_settlement_overrides = None
 
             # Call protected route
             response = await call_next(request)
@@ -347,6 +359,7 @@ def payment_middleware(
                     result.payment_payload,
                     result.payment_requirements,
                     context=context,
+                    settlement_overrides=get_settlement_overrides(request),
                 )
 
                 if not settle_result.success:

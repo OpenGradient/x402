@@ -15,7 +15,7 @@ HTTP layer for the x402 Python SDK. Provides facilitator clients, HTTP client wr
 
 ## Facilitator Client
 
-Communicates with remote x402 facilitator services.
+Communicates with remote x402 facilitator services.[x402_http_client.py](x402_http_client.py)
 
 ### Async
 

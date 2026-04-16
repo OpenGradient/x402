@@ -86,6 +86,7 @@ from .payments import (
 from .responses import (
     SettleRequest,
     SettleResponse,
+    SettlementOverrides,
     SupportedKind,
     SupportedResponse,
     VerifyRequest,
@@ -121,6 +122,7 @@ __all__ = [
     "VerifyResponse",
     "SettleRequest",
     "SettleResponse",
+    "SettlementOverrides",
     "SupportedKind",
     "SupportedResponse",
     # V1 Legacy

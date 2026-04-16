@@ -9,7 +9,12 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
+import re
+from decimal import Decimal, ROUND_DOWN, getcontext
 from typing import Any
+
+logger = logging.getLogger("x402.server")
 
 from typing_extensions import Self
 
@@ -19,8 +24,10 @@ from .schemas import (
     PaymentRequirements,
     PaymentRequirementsV1,
     ResourceConfig,
+    SettlementOverrides,
     SettleResponse,
     VerifyResponse,
+    find_schemes_by_network,
 )
 from .server_base import (
     AfterSettleHook,
@@ -47,7 +54,64 @@ __all__ = [
     "FacilitatorClient",
     "FacilitatorClientSync",
     "ResourceConfig",
+    "SettlementOverrides",
+    "resolve_settlement_override_amount",
 ]
+
+_PERCENT_RE = re.compile(r"^(\d+(?:\.\d{0,2})?)%$")
+_DOLLAR_RE = re.compile(r"^\$(\d+(?:\.\d+)?)$")
+
+
+def resolve_settlement_override_amount(
+    raw_amount: str,
+    requirements: PaymentRequirements,
+    decimals: int,
+) -> str:
+    """Resolve a settlement override amount to atomic units.
+
+    Supports raw atomic units, percentages of requirements.amount, and dollar inputs.
+    """
+    match = _PERCENT_RE.fullmatch(raw_amount)
+    if match:
+        parts = match.group(1).split(".", 1)
+        int_part = int(parts[0])
+        dec_part = int((parts[1] + "00")[:2]) if len(parts) == 2 else 0
+        scaled_percent = int_part * 100 + dec_part
+        base_amount = int(requirements.amount)
+        return str((base_amount * scaled_percent) // 10_000)
+
+    match = _DOLLAR_RE.fullmatch(raw_amount)
+    if match:
+        getcontext().prec = 80
+        atomic = (Decimal(match.group(1)) * (Decimal(10) ** decimals)).to_integral_value(
+            rounding=ROUND_DOWN
+        )
+        return str(int(atomic))
+
+    return raw_amount
+
+
+def _apply_settlement_overrides(
+    server: x402ResourceServerBase,
+    requirements: PaymentRequirements | PaymentRequirementsV1,
+    overrides: SettlementOverrides | None,
+) -> PaymentRequirements | PaymentRequirementsV1:
+    if overrides is None or not overrides.amount:
+        return requirements
+
+    if not isinstance(requirements, PaymentRequirements):
+        return requirements
+
+    decimals = 6
+    schemes = find_schemes_by_network(server._schemes, requirements.network)
+    if schemes is not None:
+        scheme_server = schemes.get(requirements.scheme)
+        get_asset_decimals = getattr(scheme_server, "get_asset_decimals", None)
+        if callable(get_asset_decimals):
+            decimals = int(get_asset_decimals(requirements.asset, requirements.network))
+
+    resolved_amount = resolve_settlement_override_amount(overrides.amount, requirements, decimals)
+    return requirements.model_copy(update={"amount": resolved_amount}, deep=True)
 
 
 def _settle_accepts_metadata(settle_method: Any) -> bool:
@@ -148,7 +212,17 @@ def _call_sync_settle_data(
     """Call sync facilitator settle_data() with backward compatibility."""
     settle_data_method = getattr(target, "settle_data", None)
     if not callable(settle_data_method):
+        logger.warning(
+            "SETTLE_DATA_SKIPPED: target %s has no settle_data method",
+            type(target).__name__,
+        )
         return
+    logger.info(
+        "SETTLE_DATA_CALL: target=%s type=%s data_len=%d",
+        type(target).__name__,
+        settlement_type,
+        len(settlement_data) if settlement_data else 0,
+    )
     if _settle_data_accepts_payload(settle_data_method):
         settle_data_method(settlement_type, settlement_data)
     else:
@@ -296,6 +370,7 @@ class x402ResourceServer(x402ResourceServerBase):
         self,
         payload: PaymentPayload | PaymentPayloadV1,
         requirements: PaymentRequirements | PaymentRequirementsV1,
+        overrides: SettlementOverrides | None = None,
         payload_bytes: bytes | None = None,
         requirements_bytes: bytes | None = None,
         settlement_type: str | None = None,
@@ -320,7 +395,13 @@ class x402ResourceServer(x402ResourceServerBase):
             PaymentAbortedError: If a before hook aborts.
             RuntimeError: If not initialized.
         """
-        gen = self._settle_payment_core(payload, requirements, payload_bytes, requirements_bytes)
+        effective_requirements = _apply_settlement_overrides(self, requirements, overrides)
+        gen = self._settle_payment_core(
+            payload,
+            effective_requirements,
+            payload_bytes,
+            requirements_bytes,
+        )
         result = None
         try:
             while True:
@@ -529,6 +610,7 @@ class x402ResourceServerSync(x402ResourceServerBase):
         self,
         payload: PaymentPayload | PaymentPayloadV1,
         requirements: PaymentRequirements | PaymentRequirementsV1,
+        overrides: SettlementOverrides | None = None,
         payload_bytes: bytes | None = None,
         requirements_bytes: bytes | None = None,
         settlement_type: str | None = None,
@@ -553,7 +635,13 @@ class x402ResourceServerSync(x402ResourceServerBase):
             PaymentAbortedError: If a before hook aborts.
             RuntimeError: If not initialized.
         """
-        gen = self._settle_payment_core(payload, requirements, payload_bytes, requirements_bytes)
+        effective_requirements = _apply_settlement_overrides(self, requirements, overrides)
+        gen = self._settle_payment_core(
+            payload,
+            effective_requirements,
+            payload_bytes,
+            requirements_bytes,
+        )
         result = None
         try:
             while True:
@@ -585,14 +673,29 @@ class x402ResourceServerSync(x402ResourceServerBase):
     ) -> None:
         """Submit settlement metadata independently from payment settlement."""
         if not self._initialized:
+            logger.error("SETTLE_DATA_ABORT: server not initialized")
             raise RuntimeError("Server not initialized. Call initialize() first.")
 
         scheme = payload.get_scheme()
         network = payload.get_network()
         target = self._facilitator_clients_map.get(network, {}).get(scheme)
         if target is None:
+            logger.warning(
+                "SETTLE_DATA_ABORT: no facilitator client for scheme=%s network=%s "
+                "(registered: %s)",
+                scheme,
+                network,
+                {n: list(s.keys()) for n, s in self._facilitator_clients_map.items()},
+            )
             return
 
+        logger.info(
+            "SETTLE_DATA_DISPATCH: scheme=%s network=%s target=%s type=%s",
+            scheme,
+            network,
+            type(target).__name__,
+            settlement_type,
+        )
         _call_sync_settle_data(target, settlement_type, settlement_data)
 
     def _execute_hook_sync(self, hook: Any, context: Any) -> Any:

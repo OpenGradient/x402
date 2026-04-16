@@ -59,6 +59,7 @@ from .x402_http_server import (
     x402HTTPResourceServer,
     x402HTTPResourceServerSync,
 )
+from ..schemas import SettlementOverrides
 
 # HTTP clients (imported on demand to avoid requiring httpx/requests)
 # from .clients import (
@@ -109,6 +110,7 @@ __all__ = [
     "HTTPResponseInstructions",
     "HTTPProcessResult",
     "ProcessSettleResult",
+    "SettlementOverrides",
     "PaywallConfig",
     "PaymentOption",
     "RouteConfig",

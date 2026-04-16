@@ -70,6 +70,13 @@ class SettleResponse(BaseX402Model):
     payer: str | None = None
     transaction: str
     network: Network
+    amount: str | None = None
+
+
+class SettlementOverrides(BaseX402Model):
+    """Optional overrides applied just before settlement."""
+
+    amount: str | None = None
 
 
 class SupportedKind(BaseX402Model):

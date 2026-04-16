@@ -10,7 +10,7 @@ import asyncio
 import inspect
 from typing import TYPE_CHECKING, Any
 
-from ..schemas import PaymentPayload, PaymentRequirements, SettleResponse
+from ..schemas import PaymentPayload, PaymentRequirements, SettlementOverrides, SettleResponse
 from ..schemas.errors import SettleError
 from ..schemas.v1 import PaymentPayloadV1
 from ..server import ResourceConfig
@@ -128,6 +128,7 @@ class x402HTTPResourceServer(x402HTTPServerBase):
         payment_payload: PaymentPayload | PaymentPayloadV1,
         requirements: PaymentRequirements,
         context: HTTPRequestContext | None = None,
+        settlement_overrides: SettlementOverrides | None = None,
     ) -> ProcessSettleResult:
         """Process settlement after successful response (async).
 
@@ -145,6 +146,7 @@ class x402HTTPResourceServer(x402HTTPServerBase):
             settle_response = await self._server.settle_payment(
                 payment_payload,
                 requirements,
+                settlement_overrides,
             )
 
             if not settle_response.success:
@@ -155,6 +157,7 @@ class x402HTTPResourceServer(x402HTTPServerBase):
                     transaction=settle_response.transaction,
                     network=settle_response.network,
                     payer=settle_response.payer,
+                    amount=settle_response.amount,
                 )
                 failure.response = await self._build_settlement_failure_response_async(
                     failure, context
@@ -167,6 +170,7 @@ class x402HTTPResourceServer(x402HTTPServerBase):
                 transaction=settle_response.transaction,
                 network=settle_response.network,
                 payer=settle_response.payer,
+                amount=settle_response.amount,
             )
 
         except SettleError as e:
@@ -185,6 +189,7 @@ class x402HTTPResourceServer(x402HTTPServerBase):
                 transaction=settle_response.transaction,
                 network=settle_response.network,
                 payer=settle_response.payer,
+                amount=settle_response.amount,
             )
             failure.response = await self._build_settlement_failure_response_async(failure, context)
             return failure
@@ -203,6 +208,7 @@ class x402HTTPResourceServer(x402HTTPServerBase):
                 headers=self._create_settlement_headers(settle_response, requirements),
                 transaction="",
                 network=requirements.network,
+                amount=settle_response.amount,
             )
             failure.response = await self._build_settlement_failure_response_async(failure, context)
             return failure

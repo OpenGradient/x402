@@ -13,6 +13,7 @@ if TYPE_CHECKING:
         PaymentPayload,
         PaymentRequirements,
         Price,
+        SettlementOverrides,
     )
 
 
@@ -116,6 +117,7 @@ class ProcessSettleResult:
     transaction: str | None = None
     network: str | None = None
     payer: str | None = None
+    amount: str | None = None
     response: HTTPResponseInstructions | None = None  # Only set when success=False
 
 

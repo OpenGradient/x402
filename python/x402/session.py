@@ -206,6 +206,22 @@ class SessionStore:
         with self._lock:
             return self._sessions.pop(session_id, None)
 
+    def mark_settling(self, session_id: str) -> bool:
+        """Claim a session for settlement to avoid duplicate retries."""
+        with self._lock:
+            entry = self._sessions.get(session_id)
+            if entry is None or entry.settled or entry.settling:
+                return False
+            entry.settling = True
+            return True
+
+    def clear_settling(self, session_id: str) -> None:
+        """Release a previously claimed session after settlement failure."""
+        with self._lock:
+            entry = self._sessions.get(session_id)
+            if entry is not None and not entry.settled:
+                entry.settling = False
+
     def mark_settled(self, session_id: str, tx_hash: str) -> None:
         """Mark a session as settled.
 
@@ -234,7 +250,7 @@ class SessionStore:
         expired: list[UptoSession] = []
         with self._lock:
             for session in self._sessions.values():
-                if session.settled:
+                if session.settled or session.settling:
                     continue
                 if now - session.last_activity > idle_timeout_seconds:
                     expired.append(session)
@@ -249,7 +265,7 @@ class SessionStore:
         exhausted: list[UptoSession] = []
         with self._lock:
             for session in self._sessions.values():
-                if session.settled:
+                if session.settled or session.settling:
                     continue
                 if session.is_exhausted:
                     exhausted.append(session)

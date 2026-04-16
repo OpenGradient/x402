@@ -111,6 +111,7 @@ from .schemas import (
     SettleContext,
     SettleError,
     SettleFailureContext,
+    SettlementOverrides,
     # Responses
     SettleResponse,
     SettleResultContext,
@@ -186,6 +187,7 @@ __all__ = [
     # Types - Responses
     "VerifyResponse",
     "SettleResponse",
+    "SettlementOverrides",
     "SupportedKind",
     "SupportedResponse",
     # Types - Config

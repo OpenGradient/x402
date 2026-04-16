@@ -7,7 +7,10 @@ implementations for communicating with remote facilitator services.
 from __future__ import annotations
 
 import json
+import logging
 from typing import TYPE_CHECKING, Any, TypeVar
+
+logger = logging.getLogger("x402.facilitator_client")
 
 from pydantic import ValidationError
 
@@ -85,6 +88,33 @@ def _parse_facilitator_response(
         raise FacilitatorResponseError(
             f"Facilitator {operation} returned invalid data: {_response_excerpt(response)}"
         ) from exc
+
+
+def _parse_async_settle_acceptance(
+    response: Any,
+    requirements_dict: dict[str, Any],
+) -> SettleResponse:
+    """Convert an async facilitator 202 response into a settle result."""
+    transaction = ""
+
+    try:
+        response_data = response.json()
+    except (json.JSONDecodeError, ValueError, TypeError):
+        response_data = None
+
+    if isinstance(response_data, dict):
+        payment_job = response_data.get("paymentJob")
+        if isinstance(payment_job, dict):
+            job_id = payment_job.get("jobId")
+            if isinstance(job_id, str):
+                transaction = job_id
+
+    return SettleResponse(
+        success=True,
+        transaction=transaction,
+        network=requirements_dict["network"],
+        amount=requirements_dict.get("amount"),
+    )
 
 
 # ============================================================================
@@ -321,6 +351,9 @@ class HTTPFacilitatorClient(HTTPFacilitatorClientBase):
             headers=self._get_settle_headers(),
             json=request_body,
         )
+
+        if response.status_code == 202:
+            return _parse_async_settle_acceptance(response, requirements_dict)
 
         if response.status_code != 200:
             raise ValueError(f"Facilitator settle failed ({response.status_code}): {response.text}")
@@ -564,14 +597,29 @@ class HTTPFacilitatorClientSync(HTTPFacilitatorClientBase):
         """Internal settle via HTTP."""
         client = self._get_client()
         request_body = self._build_request_body(version, payload_dict, requirements_dict)
+        url = f"{self._url}/settle"
 
-        response = client.post(
-            f"{self._url}/settle",
-            headers=self._get_settle_headers(),
-            json=request_body,
+        logger.info(
+            "SETTLE_HTTP: POST %s scheme=%s network=%s amount=%s",
+            url,
+            requirements_dict.get("scheme", "?"),
+            requirements_dict.get("network", "?"),
+            requirements_dict.get("amount", "?"),
         )
 
+        response = client.post(url, headers=self._get_settle_headers(), json=request_body)
+
+        logger.info("SETTLE_HTTP: response status=%d", response.status_code)
+
+        if response.status_code == 202:
+            return _parse_async_settle_acceptance(response, requirements_dict)
+
         if response.status_code != 200:
+            logger.error(
+                "SETTLE_HTTP: failed status=%d body=%s",
+                response.status_code,
+                response.text[:500],
+            )
             raise ValueError(f"Facilitator settle failed ({response.status_code}): {response.text}")
 
         return _parse_facilitator_response(response, SettleResponse, "settle")
@@ -583,12 +631,17 @@ class HTTPFacilitatorClientSync(HTTPFacilitatorClientBase):
     ) -> None:
         """Internal settle_data via HTTP."""
         client = self._get_client()
-        response = client.post(
-            f"{self._url}/settle_data",
-            headers=self._get_settle_data_headers(settlement_type, settlement_data),
-            json={},
+        url = f"{self._url}/settle_data"
+        headers = self._get_settle_data_headers(settlement_type, settlement_data)
+        logger.debug(
+            "POST %s type=%s data_len=%d",
+            url,
+            settlement_type,
+            len(settlement_data) if settlement_data else 0,
         )
+        response = client.post(url, headers=headers, json={})
         if response.status_code not in (200, 202):
             raise ValueError(
                 f"Facilitator settle_data failed ({response.status_code}): {response.text}"
             )
+        logger.debug("settle_data response: %s", response.status_code)

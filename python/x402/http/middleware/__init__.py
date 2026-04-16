@@ -19,12 +19,16 @@ __all__ = [
     "PaymentMiddlewareASGI",
     "fastapi_payment_middleware",
     "fastapi_payment_middleware_from_config",
+    "fastapi_settlement_overrides",
+    "fastapi_get_settlement_overrides",
     # Flask
     "FlaskAdapter",
     "FlaskPaymentMiddleware",
     "ResponseWrapper",
     "flask_payment_middleware",
     "flask_payment_middleware_from_config",
+    "flask_settlement_overrides",
+    "flask_get_settlement_overrides",
 ]
 
 
@@ -36,6 +40,8 @@ def __getattr__(name: str):
         "PaymentMiddlewareASGI",
         "fastapi_payment_middleware",
         "fastapi_payment_middleware_from_config",
+        "fastapi_settlement_overrides",
+        "fastapi_get_settlement_overrides",
     ):
         from . import fastapi as _fastapi
 
@@ -47,6 +53,10 @@ def __getattr__(name: str):
             return _fastapi.payment_middleware
         elif name == "fastapi_payment_middleware_from_config":
             return _fastapi.payment_middleware_from_config
+        elif name == "fastapi_settlement_overrides":
+            return _fastapi.set_settlement_overrides
+        elif name == "fastapi_get_settlement_overrides":
+            return _fastapi.get_settlement_overrides
 
     # Flask imports
     if name in (
@@ -55,6 +65,8 @@ def __getattr__(name: str):
         "ResponseWrapper",
         "flask_payment_middleware",
         "flask_payment_middleware_from_config",
+        "flask_settlement_overrides",
+        "flask_get_settlement_overrides",
     ):
         from . import flask as _flask
 
@@ -68,5 +80,9 @@ def __getattr__(name: str):
             return _flask.payment_middleware
         elif name == "flask_payment_middleware_from_config":
             return _flask.payment_middleware_from_config
+        elif name == "flask_settlement_overrides":
+            return _flask.set_settlement_overrides
+        elif name == "flask_get_settlement_overrides":
+            return _flask.get_settlement_overrides
 
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

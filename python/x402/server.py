@@ -193,22 +193,21 @@ async def _call_async_settle_data(
     target: Any,
     settlement_type: str,
     settlement_data: str | None,
-) -> None:
+) -> Any:
     """Call async facilitator settle_data() with backward compatibility."""
     settle_data_method = getattr(target, "settle_data", None)
     if not callable(settle_data_method):
-        return
+        return None
     if _settle_data_accepts_payload(settle_data_method):
-        await settle_data_method(settlement_type, settlement_data)
-    else:
-        await settle_data_method(settlement_type)
+        return await settle_data_method(settlement_type, settlement_data)
+    return await settle_data_method(settlement_type)
 
 
 def _call_sync_settle_data(
     target: Any,
     settlement_type: str,
     settlement_data: str | None,
-) -> None:
+) -> Any:
     """Call sync facilitator settle_data() with backward compatibility."""
     settle_data_method = getattr(target, "settle_data", None)
     if not callable(settle_data_method):
@@ -216,7 +215,7 @@ def _call_sync_settle_data(
             "SETTLE_DATA_SKIPPED: target %s has no settle_data method",
             type(target).__name__,
         )
-        return
+        return None
     logger.info(
         "SETTLE_DATA_CALL: target=%s type=%s data_len=%d",
         type(target).__name__,
@@ -224,9 +223,8 @@ def _call_sync_settle_data(
         len(settlement_data) if settlement_data else 0,
     )
     if _settle_data_accepts_payload(settle_data_method):
-        settle_data_method(settlement_type, settlement_data)
-    else:
-        settle_data_method(settlement_type)
+        return settle_data_method(settlement_type, settlement_data)
+    return settle_data_method(settlement_type)
 
 
 # ============================================================================
@@ -430,7 +428,7 @@ class x402ResourceServer(x402ResourceServerBase):
         requirements: PaymentRequirements | PaymentRequirementsV1,
         settlement_type: str,
         settlement_data: str | None = None,
-    ) -> None:
+    ) -> Any:
         """Submit settlement metadata independently from payment settlement."""
         if not self._initialized:
             raise RuntimeError("Server not initialized. Call initialize() first.")
@@ -439,9 +437,9 @@ class x402ResourceServer(x402ResourceServerBase):
         network = payload.get_network()
         target = self._facilitator_clients_map.get(network, {}).get(scheme)
         if target is None:
-            return
+            return None
 
-        await _call_async_settle_data(target, settlement_type, settlement_data)
+        return await _call_async_settle_data(target, settlement_type, settlement_data)
 
     async def _execute_hook(self, hook: Any, context: Any) -> Any:
         """Execute hook, auto-detecting sync/async."""
@@ -670,7 +668,7 @@ class x402ResourceServerSync(x402ResourceServerBase):
         requirements: PaymentRequirements | PaymentRequirementsV1,
         settlement_type: str,
         settlement_data: str | None = None,
-    ) -> None:
+    ) -> Any:
         """Submit settlement metadata independently from payment settlement."""
         if not self._initialized:
             logger.error("SETTLE_DATA_ABORT: server not initialized")
@@ -687,7 +685,7 @@ class x402ResourceServerSync(x402ResourceServerBase):
                 network,
                 {n: list(s.keys()) for n, s in self._facilitator_clients_map.items()},
             )
-            return
+            return None
 
         logger.info(
             "SETTLE_DATA_DISPATCH: scheme=%s network=%s target=%s type=%s",
@@ -696,7 +694,7 @@ class x402ResourceServerSync(x402ResourceServerBase):
             type(target).__name__,
             settlement_type,
         )
-        _call_sync_settle_data(target, settlement_type, settlement_data)
+        return _call_sync_settle_data(target, settlement_type, settlement_data)
 
     def _execute_hook_sync(self, hook: Any, context: Any) -> Any:
         """Execute hook synchronously. Raises if async hook detected."""

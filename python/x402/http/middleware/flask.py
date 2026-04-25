@@ -36,6 +36,7 @@ from ..types import (
     HTTPAdapter,
     HTTPRequestContext,
     PaywallConfig,
+    ProcessSettleResult,
     RouteConfig,
     RoutesConfig,
 )
@@ -1071,6 +1072,18 @@ class PaymentMiddleware:
         raw_settlement_type = environ.get("HTTP_X_SETTLEMENT_TYPE", "")
         requested_settlement_type = _normalize_settlement_type(raw_settlement_type)
 
+        if requested_settlement_type == "individual":
+            return self._buffer_session_response(
+                environ=environ,
+                start_response=start_response,
+                context=context,
+                session_id=session_id,
+                payment_payload=payment_payload,
+                payment_requirements=payment_requirements,
+                request_body_bytes=request_body_bytes,
+                requested_settlement_type=requested_settlement_type,
+            )
+
         cost_context: dict[str, Any] = {
             "method": context.method,
             "path": context.path,
@@ -1093,6 +1106,97 @@ class PaymentMiddleware:
             cost_context=cost_context,
             status_ref=status_capture,
         )
+
+    def _buffer_session_response(
+        self,
+        *,
+        environ: dict[str, Any],
+        start_response: Callable[..., Any],
+        context: HTTPRequestContext,
+        session_id: str,
+        payment_payload: PaymentPayload,
+        payment_requirements: PaymentRequirements,
+        request_body_bytes: bytes,
+        requested_settlement_type: str | None,
+    ) -> Iterator[bytes]:
+        """Buffer an individual-settlement session response so headers can include tx metadata."""
+        response_wrapper = ResponseWrapper(start_response)
+        body_chunks: list[bytes] = []
+
+        for chunk in self._original_wsgi(environ, response_wrapper):
+            body_chunks.append(chunk)
+
+        if (
+            response_wrapper.status_code is not None
+            and 200 <= response_wrapper.status_code < 300
+        ):
+            body_bytes = b"".join(response_wrapper._write_chunks + body_chunks)
+            response_json = _parse_json_bytes(body_bytes)
+            if response_json is None:
+                response_json = _parse_sse_final_json(body_bytes)
+
+            cost_context: dict[str, Any] = {
+                "method": context.method,
+                "path": context.path,
+                "request_body_bytes": request_body_bytes,
+                "request_json": _try_parse_json(request_body_bytes),
+                "payment_payload": payment_payload,
+                "payment_requirements": payment_requirements,
+                "requested_settlement_type": requested_settlement_type,
+                "response_body_bytes": body_bytes,
+                "status_code": response_wrapper.status_code,
+                "response_json": response_json,
+                "response_object": response_json,
+                "is_streaming": body_bytes.lstrip().startswith(b"data:"),
+            }
+
+            try:
+                if self._session_cost_calculator:
+                    cost = self._session_cost_calculator(cost_context)
+                elif self._cost_per_request is not None:
+                    cost = self._cost_per_request
+                else:
+                    cost = 0
+
+                cost = max(0, int(cost or 0))
+                if cost > 0:
+                    assert self._session_store is not None
+                    self._session_store.add_cost(session_id, cost)
+
+                self._append_tee_response_headers(
+                    response_wrapper=response_wrapper,
+                    request_body_bytes=request_body_bytes,
+                    response_body_bytes=body_bytes,
+                    output_object=response_json,
+                )
+
+                settlement_type, settlement_data = self._build_settlement_metadata(
+                    request_body_bytes=request_body_bytes,
+                    response_body_bytes=body_bytes,
+                    payment_payload=payment_payload,
+                    requested_settlement_type=requested_settlement_type,
+                    output_object=response_json,
+                )
+                if settlement_type != "private" and settlement_data:
+                    settle_data_result = self._http_server.process_settlement_data(
+                        payment_payload,
+                        payment_requirements,
+                        settlement_type=settlement_type,
+                        settlement_data=settlement_data,
+                    )
+                    self._append_settlement_data_response_headers(
+                        response_wrapper=response_wrapper,
+                        settle_data_result=settle_data_result,
+                    )
+            except Exception:
+                logger.exception(
+                    "Failed to compute individual session settlement metadata for session %s",
+                    session_id,
+                )
+
+        response_wrapper.add_header(UPTO_SESSION_HEADER, session_id)
+        response_wrapper.send_response(body_chunks)
+        return []
 
     def _accumulate_session_cost(
         self,
@@ -1338,6 +1442,19 @@ class PaymentMiddleware:
         if resolved_oh:
             response_wrapper.add_header(TEE_OUTPUT_HASH_HEADER, str(resolved_oh))
 
+    def _append_settlement_data_response_headers(
+        self,
+        *,
+        response_wrapper: Any,
+        settle_data_result: ProcessSettleResult,
+    ) -> None:
+        """Attach facilitator /settle_data job metadata to the user response."""
+        if not settle_data_result.success:
+            return
+        for key, value in settle_data_result.headers.items():
+            if value:
+                response_wrapper.add_header(key, value)
+
     def _submit_settlement_data_in_background(
         self,
         payment_payload: Any,
@@ -1399,6 +1516,8 @@ class PaymentMiddleware:
         g.payment_requirements = result.payment_requirements
         g.x402_settlement_overrides = None
 
+        request_body_bytes = _read_body_bytes(environ)
+
         # Capture response
         response_wrapper = ResponseWrapper(start_response)
         body_chunks: list[bytes] = []
@@ -1455,6 +1574,42 @@ class PaymentMiddleware:
                     [("Content-Type", "application/json")],
                 )
                 return [json.dumps({}).encode("utf-8")]
+
+            response_body_bytes = b"".join(response_wrapper._write_chunks + body_chunks)
+            output_object = _parse_json_bytes(response_body_bytes)
+            if output_object is None:
+                output_object = _parse_sse_final_json(response_body_bytes)
+
+            self._append_tee_response_headers(
+                response_wrapper=response_wrapper,
+                request_body_bytes=request_body_bytes,
+                response_body_bytes=response_body_bytes,
+                output_object=output_object,
+            )
+
+            raw_settlement_type = environ.get("HTTP_X_SETTLEMENT_TYPE", "")
+            requested_settlement_type = _normalize_settlement_type(raw_settlement_type)
+            try:
+                settlement_type, settlement_data = self._build_settlement_metadata(
+                    request_body_bytes=request_body_bytes,
+                    response_body_bytes=response_body_bytes,
+                    payment_payload=result.payment_payload,
+                    requested_settlement_type=requested_settlement_type,
+                    output_object=output_object,
+                )
+                if settlement_type != "private" and settlement_data:
+                    settle_data_result = self._http_server.process_settlement_data(
+                        result.payment_payload,
+                        result.payment_requirements,
+                        settlement_type=settlement_type,
+                        settlement_data=settlement_data,
+                    )
+                    self._append_settlement_data_response_headers(
+                        response_wrapper=response_wrapper,
+                        settle_data_result=settle_data_result,
+                    )
+            except Exception:
+                logger.exception("Failed to build/submit settlement data")
 
         # Send buffered response
         response_wrapper.send_response(body_chunks)

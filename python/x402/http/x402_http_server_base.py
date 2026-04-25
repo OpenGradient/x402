@@ -57,6 +57,30 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("x402")
 
+
+def _create_settlement_data_headers(settlement_response: dict[str, Any]) -> dict[str, str]:
+    """Expose async /settle_data job metadata as HTTP response headers."""
+    job = settlement_response.get("settlementJob")
+    if not isinstance(job, dict):
+        return {}
+
+    header_map = {
+        "jobId": "X-Settlement-Job-ID",
+        "queue": "X-Settlement-Queue",
+        "status": "X-Settlement-Status",
+        "settlementType": "X-Settlement-Type",
+        "queueNonce": "X-Settlement-Queue-Nonce",
+        "signerAddress": "X-Settlement-Signer-Address",
+        "txHash": "X-Settlement-Tx-Hash",
+        "walrusBlobId": "X-Settlement-Walrus-Blob-ID",
+    }
+    headers: dict[str, str] = {}
+    for key, header_name in header_map.items():
+        value = job.get(key)
+        if value is not None:
+            headers[header_name] = str(value)
+    return headers
+
 # ============================================================================
 # Paywall Provider Protocol
 # ============================================================================
@@ -519,14 +543,17 @@ class x402HTTPServerBase:
             getattr(requirements, "network", "?"),
         )
         try:
-            self._server.submit_settlement_data(
+            settlement_response = self._server.submit_settlement_data(
                 payment_payload,
                 requirements,
                 settlement_type=settlement_type,
                 settlement_data=settlement_data,
             )
             logger.info("PROCESS_SETTLEMENT_DATA: success")
-            return ProcessSettleResult(success=True)
+            headers: dict[str, str] = {}
+            if isinstance(settlement_response, dict):
+                headers.update(_create_settlement_data_headers(settlement_response))
+            return ProcessSettleResult(success=True, headers=headers)
         except Exception as e:
             settle_response = SettleResponse(
                 success=False,

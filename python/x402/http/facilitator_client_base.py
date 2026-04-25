@@ -100,7 +100,7 @@ class FacilitatorClient(Protocol):
         self,
         settlement_type: str,
         settlement_data: str | None = None,
-    ) -> None:
+    ) -> dict[str, Any] | None:
         """Submit settlement data side-channel payload."""
         ...
 
@@ -134,7 +134,7 @@ class FacilitatorClientSync(Protocol):
         self,
         settlement_type: str,
         settlement_data: str | None = None,
-    ) -> None:
+    ) -> dict[str, Any] | None:
         """Submit settlement data side-channel payload."""
         ...
 

@@ -224,9 +224,9 @@ class HTTPFacilitatorClient(HTTPFacilitatorClientBase):
         self,
         settlement_type: str,
         settlement_data: str | None = None,
-    ) -> None:
+    ) -> dict[str, Any] | None:
         """Submit settlement data to facilitator (async)."""
-        await self._settle_data_http(settlement_type, settlement_data)
+        return await self._settle_data_http(settlement_type, settlement_data)
 
     def get_supported(self) -> SupportedResponse:
         """Get supported payment kinds and extensions.
@@ -364,7 +364,7 @@ class HTTPFacilitatorClient(HTTPFacilitatorClientBase):
         self,
         settlement_type: str,
         settlement_data: str | None = None,
-    ) -> None:
+    ) -> dict[str, Any] | None:
         """Internal settle_data via HTTP (async)."""
         client = self._get_async_client()
         response = await client.post(
@@ -376,6 +376,9 @@ class HTTPFacilitatorClient(HTTPFacilitatorClientBase):
             raise ValueError(
                 f"Facilitator settle_data failed ({response.status_code}): {response.text}"
             )
+        if not response.content:
+            return None
+        return response.json()
 
 
 # ============================================================================
@@ -478,9 +481,9 @@ class HTTPFacilitatorClientSync(HTTPFacilitatorClientBase):
         self,
         settlement_type: str,
         settlement_data: str | None = None,
-    ) -> None:
+    ) -> dict[str, Any] | None:
         """Submit settlement data to facilitator (sync)."""
-        self._settle_data_http(settlement_type, settlement_data)
+        return self._settle_data_http(settlement_type, settlement_data)
 
     def get_supported(self) -> SupportedResponse:
         """Get supported payment kinds and extensions.
@@ -628,7 +631,7 @@ class HTTPFacilitatorClientSync(HTTPFacilitatorClientBase):
         self,
         settlement_type: str,
         settlement_data: str | None = None,
-    ) -> None:
+    ) -> dict[str, Any] | None:
         """Internal settle_data via HTTP."""
         client = self._get_client()
         url = f"{self._url}/settle_data"
@@ -645,3 +648,6 @@ class HTTPFacilitatorClientSync(HTTPFacilitatorClientBase):
                 f"Facilitator settle_data failed ({response.status_code}): {response.text}"
             )
         logger.debug("settle_data response: %s", response.status_code)
+        if not response.content:
+            return None
+        return response.json()

@@ -142,6 +142,57 @@ def _parse_sse_final_json(data: bytes) -> dict | None:
     return last_json
 
 
+def _is_sse_done_event(event: bytes) -> bool:
+    """Return True when an SSE event block is exactly data: [DONE]."""
+    for line in event.decode("utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if line.startswith("data:"):
+            return line[len("data:"):].strip() == "[DONE]"
+    return False
+
+
+def _parse_sse_event_json(event: bytes) -> dict | None:
+    """Parse the first JSON data payload from an SSE event block."""
+    for line in event.decode("utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[len("data:"):].strip()
+        if payload == "[DONE]":
+            return None
+        try:
+            parsed = json.loads(payload)
+        except (json.JSONDecodeError, ValueError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
+
+
+def _is_sse_final_payload(payload: dict[str, Any]) -> bool:
+    """Return True for the final OpenAI-shaped streaming chunk."""
+    choices = payload.get("choices")
+    if isinstance(choices, list):
+        for choice in choices:
+            if isinstance(choice, dict) and choice.get("finish_reason") is not None:
+                return True
+    return "usage" in payload
+
+
+def _encode_sse_data(payload: dict[str, Any]) -> bytes:
+    """Encode a JSON payload as a single SSE data event."""
+    encoded = json.dumps(payload, separators=(",", ":"), default=str)
+    return f"data: {encoded}\n\n".encode("utf-8")
+
+
+def _get_header(headers: dict[str, str], name: str) -> str | None:
+    """Case-insensitive lookup for a header dict."""
+    wanted = name.lower()
+    for key, value in headers.items():
+        if key.lower() == wanted:
+            return value
+    return None
+
+
 def _read_body_bytes(environ: dict[str, Any]) -> bytes:
     """Read the request body from the WSGI environ and rewind the stream.
 
@@ -739,6 +790,86 @@ class StreamingSessionResponse:
             )
 
 
+class IndividualStreamingSessionResponse:
+    """Stream SSE immediately and add individual settlement metadata to the final chunk."""
+
+    def __init__(
+        self,
+        upstream_iter: Iterator[bytes],
+        middleware: PaymentMiddleware,
+        session_id: str,
+        cost_context: dict[str, Any],
+        status_ref: StatusCapture,
+    ) -> None:
+        self._upstream = upstream_iter
+        self._captured: list[bytes] = []
+        self._middleware = middleware
+        self._session_id = session_id
+        self._cost_context = cost_context
+        self._status_ref = status_ref
+        self._buffer = b""
+        self._done_event = b"data: [DONE]\n\n"
+        self._final_payload: dict[str, Any] | None = None
+
+    def __iter__(self) -> Iterator[bytes]:
+        """Yield upstream SSE events as they arrive, delaying only the final metadata chunk."""
+        for chunk in self._upstream:
+            if not chunk:
+                continue
+            self._captured.append(chunk)
+            self._buffer += chunk
+
+            while b"\n\n" in self._buffer:
+                event, self._buffer = self._buffer.split(b"\n\n", 1)
+                event_bytes = event + b"\n\n"
+                if _is_sse_done_event(event_bytes):
+                    self._done_event = event_bytes
+                    continue
+                event_payload = _parse_sse_event_json(event_bytes)
+                if event_payload is not None and _is_sse_final_payload(event_payload):
+                    self._final_payload = event_payload
+                    continue
+                yield event_bytes
+
+        if self._buffer:
+            if _is_sse_done_event(self._buffer):
+                self._done_event = (
+                    self._buffer if self._buffer.endswith(b"\n\n") else self._buffer + b"\n\n"
+                )
+            else:
+                event_payload = _parse_sse_event_json(self._buffer)
+                if event_payload is not None and _is_sse_final_payload(event_payload):
+                    self._final_payload = event_payload
+                else:
+                    yield self._buffer
+            self._buffer = b""
+
+        settlement_metadata = self._middleware._process_individual_streaming_settlement(
+            self._session_id,
+            self._captured,
+            self._status_ref,
+            self._cost_context,
+        )
+        if self._final_payload is not None:
+            if settlement_metadata:
+                self._final_payload.update(settlement_metadata)
+            yield _encode_sse_data(self._final_payload)
+        elif settlement_metadata:
+            yield _encode_sse_data(
+                {
+                    "choices": [],
+                    "model": "unknown",
+                    **settlement_metadata,
+                }
+            )
+        yield self._done_event
+
+    def close(self) -> None:
+        """Close the upstream iterator."""
+        if hasattr(self._upstream, "close"):
+            self._upstream.close()
+
+
 # ============================================================================
 # Flask Middleware Class
 # ============================================================================
@@ -1072,6 +1203,33 @@ class PaymentMiddleware:
         raw_settlement_type = environ.get("HTTP_X_SETTLEMENT_TYPE", "")
         requested_settlement_type = _normalize_settlement_type(raw_settlement_type)
 
+        if (
+            requested_settlement_type == "individual"
+            and isinstance(request_json, dict)
+            and request_json.get("stream") is True
+        ):
+            cost_context: dict[str, Any] = {
+                "method": context.method,
+                "path": context.path,
+                "request_body_bytes": request_body_bytes,
+                "request_json": request_json,
+                "payment_payload": payment_payload,
+                "payment_requirements": payment_requirements,
+                "requested_settlement_type": requested_settlement_type,
+            }
+
+            status_capture = StatusCapture(start_response)
+            status_capture.add_header(UPTO_SESSION_HEADER, session_id)
+            upstream_iter = self._original_wsgi(environ, status_capture)
+
+            return IndividualStreamingSessionResponse(
+                upstream_iter,
+                middleware=self,
+                session_id=session_id,
+                cost_context=cost_context,
+                status_ref=status_capture,
+            )
+
         if requested_settlement_type == "individual":
             return self._buffer_session_response(
                 environ=environ,
@@ -1197,6 +1355,96 @@ class PaymentMiddleware:
         response_wrapper.add_header(UPTO_SESSION_HEADER, session_id)
         response_wrapper.send_response(body_chunks)
         return []
+
+    def _process_individual_streaming_settlement(
+        self,
+        session_id: str,
+        captured_chunks: list[bytes],
+        status_ref: StatusCapture,
+        cost_context: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Compute individual settlement for an SSE stream and return final-chunk metadata."""
+        status_code = status_ref.status_code
+        if not (200 <= status_code < 300):
+            return None
+
+        body_bytes = b"".join(captured_chunks)
+        response_json = _parse_sse_final_json(body_bytes)
+
+        try:
+            if self._session_cost_calculator:
+                cost = self._session_cost_calculator(
+                    {
+                        **cost_context,
+                        "response_body_bytes": body_bytes,
+                        "status_code": status_code,
+                        "response_json": response_json,
+                        "response_object": response_json,
+                        "is_streaming": True,
+                    }
+                )
+            elif self._cost_per_request is not None:
+                cost = self._cost_per_request
+            else:
+                cost = 0
+
+            cost = max(0, int(cost or 0))
+            if cost > 0:
+                assert self._session_store is not None
+                self._session_store.add_cost(session_id, cost)
+
+            payment_payload = cost_context.get("payment_payload")
+            payment_requirements = cost_context.get("payment_requirements")
+            requested_settlement_type = cost_context.get("requested_settlement_type")
+            request_body_bytes = cost_context.get("request_body_bytes", b"")
+            if not payment_payload or not payment_requirements:
+                return None
+
+            settlement_type, settlement_data = self._build_settlement_metadata(
+                request_body_bytes=request_body_bytes,
+                response_body_bytes=body_bytes,
+                payment_payload=payment_payload,
+                requested_settlement_type=requested_settlement_type,
+                output_object=response_json,
+            )
+            if settlement_type == "private" or not settlement_data:
+                return None
+
+            settle_data_result = self._http_server.process_settlement_data(
+                payment_payload,
+                payment_requirements,
+                settlement_type=settlement_type,
+                settlement_data=settlement_data,
+            )
+            if not settle_data_result.success:
+                return {
+                    "data_settlement_success": False,
+                    "data_settlement_error": settle_data_result.error_reason,
+                }
+
+            headers = settle_data_result.headers
+            payload: dict[str, Any] = {
+                "data_settlement_success": True,
+                "settlement_type": settlement_type,
+                "data_settlement_transaction_hash": _get_header(
+                    headers, "X-Settlement-Tx-Hash"
+                ),
+                "data_settlement_blob_id": _get_header(
+                    headers, "X-Settlement-Walrus-Blob-ID"
+                ),
+                "settlement_job_id": _get_header(headers, "X-Settlement-Job-ID"),
+                "settlement_queue_nonce": _get_header(headers, "X-Settlement-Queue-Nonce"),
+            }
+            return {key: value for key, value in payload.items() if value is not None}
+        except Exception as exc:
+            logger.exception(
+                "Failed to compute individual streaming settlement for session %s",
+                session_id,
+            )
+            return {
+                "data_settlement_success": False,
+                "data_settlement_error": str(exc),
+            }
 
     def _accumulate_session_cost(
         self,

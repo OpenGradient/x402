@@ -814,7 +814,7 @@ class PaymentMiddleware:
         self._session_cost_calculator = session_cost_calculator
         self._cost_per_request = cost_per_request
         self._session_idle_timeout = session_idle_timeout
-        self._settlement_safety_margin = settlement_safety_margin
+        self._settlement_safety_margin = max(0, int(settlement_safety_margin))
         self._payment_to_session: dict[str, str] = {}
         self._session_map_lock = threading.Lock()
         self._reaper_thread: threading.Thread | None = None

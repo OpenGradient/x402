@@ -77,6 +77,7 @@ class SettlementOverrides(BaseX402Model):
     """Optional overrides applied just before settlement."""
 
     amount: str | None = None
+    usage_metadata: dict[str, Any] | None = None
 
 
 class SupportedKind(BaseX402Model):

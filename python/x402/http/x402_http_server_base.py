@@ -479,6 +479,11 @@ class x402HTTPServerBase:
                 payment_payload,
                 requirements,
                 settlement_overrides,
+                usage_metadata=(
+                    settlement_overrides.usage_metadata
+                    if settlement_overrides is not None
+                    else None
+                ),
             )
 
             if not settle_response.success:

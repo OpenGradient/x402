@@ -200,6 +200,7 @@ class HTTPFacilitatorClient(HTTPFacilitatorClientBase):
         requirements: PaymentRequirements | PaymentRequirementsV1,
         settlement_type: str | None = None,
         settlement_data: str | None = None,
+        usage_metadata: dict[str, Any] | None = None,
     ) -> SettleResponse:
         """Settle a payment with the facilitator (async).
 
@@ -218,6 +219,7 @@ class HTTPFacilitatorClient(HTTPFacilitatorClientBase):
             payload.x402_version,
             payload.model_dump(by_alias=True, exclude_none=True),
             requirements.model_dump(by_alias=True, exclude_none=True),
+            usage_metadata=usage_metadata,
         )
 
     async def settle_data(
@@ -341,10 +343,16 @@ class HTTPFacilitatorClient(HTTPFacilitatorClientBase):
         version: int,
         payload_dict: dict[str, Any],
         requirements_dict: dict[str, Any],
+        usage_metadata: dict[str, Any] | None = None,
     ) -> SettleResponse:
         """Internal settle via HTTP (async)."""
         client = self._get_async_client()
-        request_body = self._build_request_body(version, payload_dict, requirements_dict)
+        request_body = self._build_request_body(
+            version,
+            payload_dict,
+            requirements_dict,
+            usage_metadata=usage_metadata,
+        )
 
         response = await client.post(
             f"{self._url}/settle",
@@ -457,6 +465,7 @@ class HTTPFacilitatorClientSync(HTTPFacilitatorClientBase):
         requirements: PaymentRequirements | PaymentRequirementsV1,
         settlement_type: str | None = None,
         settlement_data: str | None = None,
+        usage_metadata: dict[str, Any] | None = None,
     ) -> SettleResponse:
         """Settle a payment with the facilitator.
 
@@ -475,6 +484,7 @@ class HTTPFacilitatorClientSync(HTTPFacilitatorClientBase):
             payload.x402_version,
             payload.model_dump(by_alias=True, exclude_none=True),
             requirements.model_dump(by_alias=True, exclude_none=True),
+            usage_metadata=usage_metadata,
         )
 
     def settle_data(
@@ -596,10 +606,16 @@ class HTTPFacilitatorClientSync(HTTPFacilitatorClientBase):
         version: int,
         payload_dict: dict[str, Any],
         requirements_dict: dict[str, Any],
+        usage_metadata: dict[str, Any] | None = None,
     ) -> SettleResponse:
         """Internal settle via HTTP."""
         client = self._get_client()
-        request_body = self._build_request_body(version, payload_dict, requirements_dict)
+        request_body = self._build_request_body(
+            version,
+            payload_dict,
+            requirements_dict,
+            usage_metadata=usage_metadata,
+        )
         url = f"{self._url}/settle"
 
         logger.info(

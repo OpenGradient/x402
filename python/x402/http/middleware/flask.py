@@ -19,8 +19,10 @@ import hashlib
 import io
 import json
 import logging
+import os
 import re
 import threading
+import time
 from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any
 
@@ -50,6 +52,23 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("x402.flask")
 UPTO_SESSION_HEADER = "X-Upto-Session"
+DEFAULT_SESSION_IDLE_TIMEOUT = 240
+DEFAULT_SESSION_REAPER_INTERVAL = 5
+DEFAULT_SESSION_DEADLINE_BUFFER = 120
+
+
+def _env_non_negative_int(name: str, default: int) -> int:
+    try:
+        return max(0, int(os.getenv(name, str(default)) or "0"))
+    except (TypeError, ValueError):
+        logger.warning("Invalid %s value; falling back to %d", name, default)
+        return default
+
+
+IMAGE_OUTPUT_TOKEN_EQUIVALENT = _env_non_negative_int(
+    "X402_IMAGE_OUTPUT_TOKEN_EQUIVALENT",
+    10000,
+)
 
 
 # ============================================================================
@@ -140,6 +159,119 @@ def _parse_sse_final_json(data: bytes) -> dict | None:
             except (json.JSONDecodeError, ValueError):
                 continue
     return last_json
+
+
+def _non_negative_int(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _sum_token_details(value: Any) -> int | None:
+    if not isinstance(value, dict):
+        return None
+
+    total = 0
+    found = False
+    for item in value.values():
+        parsed = _non_negative_int(item)
+        if parsed is None:
+            continue
+        total += parsed
+        found = True
+
+    return total if found else None
+
+
+def _first_token_count(record: dict[str, Any], field_names: tuple[str, ...]) -> int | None:
+    for name in field_names:
+        parsed = _non_negative_int(record.get(name))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _count_generated_images(value: Any) -> int:
+    if isinstance(value, list):
+        return len(value)
+    return 0
+
+
+def _response_image_count(response_json: Any) -> int:
+    if not isinstance(response_json, dict):
+        return 0
+
+    count = _count_generated_images(response_json.get("images"))
+    count += _count_generated_images(response_json.get("data"))
+
+    choices = response_json.get("choices")
+    if isinstance(choices, list):
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            message = choice.get("message")
+            if isinstance(message, dict):
+                count += _count_generated_images(message.get("images"))
+            delta = choice.get("delta")
+            if isinstance(delta, dict):
+                count += _count_generated_images(delta.get("images"))
+
+    return count
+
+
+def _extract_response_token_usage(response_json: Any) -> dict[str, int]:
+    if not isinstance(response_json, dict):
+        return {}
+
+    image_count = _response_image_count(response_json)
+    usage = response_json.get("usage")
+    if not isinstance(usage, dict):
+        usage = response_json.get("usage_metadata")
+    if not isinstance(usage, dict):
+        usage = {}
+
+    input_tokens = _first_token_count(
+        usage,
+        ("input_tokens", "prompt_tokens"),
+    )
+    output_tokens = _first_token_count(
+        usage,
+        ("output_tokens", "completion_tokens"),
+    )
+
+    if input_tokens is None:
+        input_tokens = _sum_token_details(
+            usage.get("input_token_details") or usage.get("prompt_tokens_details")
+        )
+    if output_tokens is None:
+        output_tokens = _sum_token_details(
+            usage.get("output_token_details") or usage.get("completion_tokens_details")
+        )
+
+    if IMAGE_OUTPUT_TOKEN_EQUIVALENT > 0 and image_count > 0 and not output_tokens:
+        output_tokens = image_count * IMAGE_OUTPUT_TOKEN_EQUIVALENT
+
+    total_tokens = _first_token_count(usage, ("total_tokens",))
+    if (
+        image_count > 0
+        and output_tokens is not None
+        and total_tokens is not None
+        and total_tokens < (input_tokens or 0) + output_tokens
+    ):
+        total_tokens = (input_tokens or 0) + output_tokens
+    if total_tokens is None and input_tokens is not None and output_tokens is not None:
+        total_tokens = input_tokens + output_tokens
+
+    normalized = {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+    }
+    return {key: value for key, value in normalized.items() if value is not None}
 
 
 def _is_sse_done_event(event: bytes) -> bool:
@@ -440,6 +572,23 @@ def _extract_eth_address_from_payment_payload(payment_payload: Any) -> str | Non
         if isinstance(sp, str) and sp:
             return sp
     return None
+
+
+def _extract_upto_permit2_deadline(session: UptoSession) -> int | None:
+    """Read the signed Permit2 deadline from a stored upto session."""
+    payload = session.permit_payload
+    inner = payload.get("payload", payload) if isinstance(payload, dict) else {}
+    if not isinstance(inner, dict):
+        return None
+
+    authorization = inner.get("permit2Authorization", inner.get("permit2_authorization"))
+    if not isinstance(authorization, dict):
+        return None
+
+    try:
+        return int(authorization.get("deadline"))
+    except (TypeError, ValueError):
+        return None
 
 
 def _to_serializable_body(value: Any) -> Any:
@@ -900,7 +1049,9 @@ class PaymentMiddleware:
         session_store: SessionStoreProtocol | None = None,
         session_cost_calculator: Callable[[dict[str, Any]], int] | None = None,
         cost_per_request: int | None = None,
-        session_idle_timeout: int = 3600,
+        session_idle_timeout: int = DEFAULT_SESSION_IDLE_TIMEOUT,
+        session_reaper_interval: int = DEFAULT_SESSION_REAPER_INTERVAL,
+        session_deadline_buffer: int = DEFAULT_SESSION_DEADLINE_BUFFER,
     ) -> None:
         """Initialize Flask payment middleware.
 
@@ -916,6 +1067,8 @@ class PaymentMiddleware:
                 computing per-request cost in token smallest units.
             cost_per_request: Static fallback cost when calculator is absent.
             session_idle_timeout: Seconds before an idle session is settled.
+            session_reaper_interval: Seconds between background settlement checks.
+            session_deadline_buffer: Seconds before Permit2 deadline to force settlement.
         """
         # Auto-register bazaar extension if routes declare it
         if _check_if_bazaar_needed(routes):
@@ -937,6 +1090,8 @@ class PaymentMiddleware:
         self._session_cost_calculator = session_cost_calculator
         self._cost_per_request = cost_per_request
         self._session_idle_timeout = session_idle_timeout
+        self._session_reaper_interval = session_reaper_interval
+        self._session_deadline_buffer = session_deadline_buffer
         self._payment_to_session: dict[str, str] = {}
         self._session_map_lock = threading.Lock()
         self._reaper_thread: threading.Thread | None = None
@@ -1092,8 +1247,13 @@ class PaymentMiddleware:
 
         if session_id:
             session = store.get_session(session_id)
-            if session is None or session.settled or session.is_exhausted:
-                # Session gone or used up — require new payment
+            if (
+                session is None
+                or session.settled
+                or session.is_exhausted
+                or self._session_deadline_too_close(session)
+            ):
+                # Session gone, used up, or too close to deadline — require new payment
                 start_response(
                     "402 Payment Required",
                     [("Content-Type", "application/json")],
@@ -1151,6 +1311,7 @@ class PaymentMiddleware:
             or session.settled
             or session.settling
             or session.is_exhausted
+            or self._session_deadline_too_close(session)
             or (session.route_method and session.route_method != context.method)
             or (session.route_path and session.route_path != context.path)
         ):
@@ -1179,6 +1340,15 @@ class PaymentMiddleware:
             payment_payload,
             payment_requirements,
         )
+
+    def _session_deadline_too_close(self, session: UptoSession | None) -> bool:
+        """Return True when a session should not accept more work before settlement."""
+        if session is None:
+            return True
+        deadline = _extract_upto_permit2_deadline(session)
+        if deadline is None:
+            return False
+        return deadline <= int(time.time()) + self._session_deadline_buffer
 
     def _stream_session_response(
         self,
@@ -1317,9 +1487,11 @@ class PaymentMiddleware:
                     cost = 0
 
                 cost = max(0, int(cost or 0))
+                billed = False
                 if cost > 0:
-                    assert self._session_store is not None
-                    self._session_store.add_cost(session_id, cost)
+                    billed = self._bill_session_request(session_id, cost_context, cost)
+                if not billed:
+                    self._record_served_request(session_id, cost_context, cost)
 
                 self._append_tee_response_headers(
                     response_wrapper=response_wrapper,
@@ -1371,27 +1543,29 @@ class PaymentMiddleware:
         body_bytes = b"".join(captured_chunks)
         response_json = _parse_sse_final_json(body_bytes)
 
+        # Enrich cost_context in place (mirrors the streaming path) so the cost
+        # calculator AND the usage recorders below all see the parsed response —
+        # otherwise cost_usd / is_streaming would be dropped from usage metadata.
+        cost_context["response_body_bytes"] = body_bytes
+        cost_context["status_code"] = status_code
+        cost_context["response_json"] = response_json
+        cost_context["response_object"] = response_json
+        cost_context["is_streaming"] = True
+
         try:
             if self._session_cost_calculator:
-                cost = self._session_cost_calculator(
-                    {
-                        **cost_context,
-                        "response_body_bytes": body_bytes,
-                        "status_code": status_code,
-                        "response_json": response_json,
-                        "response_object": response_json,
-                        "is_streaming": True,
-                    }
-                )
+                cost = self._session_cost_calculator(cost_context)
             elif self._cost_per_request is not None:
                 cost = self._cost_per_request
             else:
                 cost = 0
 
             cost = max(0, int(cost or 0))
+            billed = False
             if cost > 0:
-                assert self._session_store is not None
-                self._session_store.add_cost(session_id, cost)
+                billed = self._bill_session_request(session_id, cost_context, cost)
+            if not billed:
+                self._record_served_request(session_id, cost_context, cost)
 
             payment_payload = cost_context.get("payment_payload")
             payment_requirements = cost_context.get("payment_requirements")
@@ -1446,6 +1620,130 @@ class PaymentMiddleware:
                 "data_settlement_error": str(exc),
             }
 
+    def _build_session_usage_metadata(
+        self,
+        cost_context: dict[str, Any],
+        cost: int,
+    ) -> dict[str, Any]:
+        """Build coarse usage metadata for facilitator-side aggregation."""
+        explicit = cost_context.get("usage_metadata")
+        usage: dict[str, Any] = dict(explicit) if isinstance(explicit, dict) else {}
+
+        response_json = (
+            cost_context.get("inner_response_json")
+            if cost_context.get("path") == "/v1/ohttp"
+            else cost_context.get("response_json")
+        )
+        cost_block = (
+            response_json.get("opengradient")
+            if isinstance(response_json, dict)
+            and isinstance(response_json.get("opengradient"), dict)
+            else {}
+        )
+
+        usage.setdefault("request_count", cost_context.get("request_count", 1))
+        usage.setdefault("cost_opg", cost_context.get("cost_opg", cost_block.get("cost_opg", cost)))
+        if "cost_usd" not in usage:
+            cost_usd = cost_context.get("cost_usd", cost_block.get("cost_usd"))
+            if cost_usd is not None:
+                usage["cost_usd"] = cost_usd
+
+        for key, value in _extract_response_token_usage(response_json).items():
+            usage.setdefault(key, value)
+
+        usage.setdefault("method", cost_context.get("method"))
+        usage.setdefault("path", cost_context.get("path"))
+        usage.setdefault("service", cost_context.get("service"))
+        usage.setdefault("is_streaming", cost_context.get("is_streaming"))
+        usage.setdefault(
+            "settlement_type",
+            cost_context.get("requested_settlement_type") or "batch",
+        )
+
+        request_json = (
+            cost_context.get("inner_request_json")
+            if cost_context.get("path") == "/v1/ohttp"
+            else cost_context.get("request_json")
+        )
+        if isinstance(request_json, dict):
+            model = request_json.get("model")
+            if isinstance(model, str) and model:
+                usage.setdefault("model", model)
+
+        payment_requirements = cost_context.get("payment_requirements")
+        if hasattr(payment_requirements, "model_dump"):
+            payment_requirements = payment_requirements.model_dump(
+                by_alias=True,
+                exclude_none=True,
+            )
+        if isinstance(payment_requirements, dict):
+            usage.setdefault("network", payment_requirements.get("network"))
+            usage.setdefault("asset", payment_requirements.get("asset"))
+
+        return {key: value for key, value in usage.items() if value is not None}
+
+    def _bill_session_request(
+        self,
+        session_id: str,
+        cost_context: dict[str, Any],
+        cost: int,
+    ) -> bool:
+        """Bill one paid response and merge its usage in a single store call.
+
+        Prefers the store's atomic ``add_cost_and_usage`` so the reaper
+        cannot claim the session for settlement between billing and usage
+        recording (which would settle the cost without this request's
+        request_count/tokens). Falls back to ``add_cost`` + ``add_usage``
+        for stores that don't implement the atomic method.
+
+        Returns:
+            True if the cost was billed (within cap), False otherwise.
+        """
+        store = self._session_store
+        assert store is not None
+
+        usage = self._build_session_usage_metadata(cost_context, cost)
+        usage.setdefault("session_id", session_id)
+
+        atomic = getattr(store, "add_cost_and_usage", None)
+        if callable(atomic):
+            return bool(atomic(session_id, cost, usage))
+
+        if not store.add_cost(session_id, cost):
+            return False
+        add_usage = getattr(store, "add_usage", None)
+        if callable(add_usage):
+            add_usage(session_id, usage)
+        return True
+
+    def _record_served_request(
+        self,
+        session_id: str,
+        cost_context: dict[str, Any],
+        cost: int,
+    ) -> None:
+        """Count one served 2xx response that could not be billed.
+
+        Called when ``add_cost`` is refused (spend cap exceeded or session
+        settling) or when the computed cost is zero.  Records only the
+        served-request count + descriptive fields so ``request_count``
+        reflects inferences actually served, never the unbilled cost.
+        """
+        store = self._session_store
+        if store is None:
+            return
+
+        record = getattr(store, "record_served_request", None)
+        if not callable(record):
+            return
+
+        usage = self._build_session_usage_metadata(cost_context, cost)
+        if not usage:
+            return
+
+        usage.setdefault("session_id", session_id)
+        record(session_id, usage)
+
     def _accumulate_session_cost(
         self,
         session_id: str,
@@ -1490,15 +1788,19 @@ class PaymentMiddleware:
             return
 
         cost = max(0, int(cost))
+        billed = False
         if cost > 0:
-            assert self._session_store is not None
-            ok = self._session_store.add_cost(session_id, cost)
-            if not ok:
+            billed = self._bill_session_request(session_id, cost_context, cost)
+            if not billed:
                 logger.warning(
                     "Could not add cost %d to session %s (exhausted or settled)",
                     cost,
                     session_id,
                 )
+        if not billed:
+            # Response was already streamed to the client; count it even though
+            # it could not be billed so request_count stays accurate under load.
+            self._record_served_request(session_id, cost_context, cost)
 
         # -----------------------------------------------------------------
         # Submit settlement data (TEE hashes, metadata) per-request
@@ -1509,7 +1811,11 @@ class PaymentMiddleware:
         requested_settlement_type = cost_context.get("requested_settlement_type")
 
         # Resolve output_object from cost_context (already parsed during cost calc)
-        output_object = cost_context.get("response_object")
+        output_object = (
+            cost_context.get("inner_response_json")
+            if cost_context.get("path") == "/v1/ohttp"
+            else cost_context.get("response_object")
+        )
 
         if payment_payload and payment_requirements:
             try:
@@ -1878,14 +2184,15 @@ class PaymentMiddleware:
         )
         self._reaper_thread.start()
         logger.info(
-            "Session reaper started (idle_timeout=%ds)",
+            "Session reaper started (idle_timeout=%ds interval=%ds deadline_buffer=%ds)",
             self._session_idle_timeout,
+            self._session_reaper_interval,
+            self._session_deadline_buffer,
         )
 
     def _reaper_loop(self) -> None:
         """Background loop that periodically settles ready sessions."""
-        interval = min(self._session_idle_timeout // 4, 30)
-        interval = max(interval, 5)
+        interval = max(1, int(self._session_reaper_interval))
         while not self._reaper_stop.wait(timeout=interval):
             try:
                 self._settle_ready_sessions()
@@ -1898,10 +2205,55 @@ class PaymentMiddleware:
         if store is None:
             return
 
+        seen: set[str] = set()
         for session in store.get_expired_sessions(self._session_idle_timeout):
+            seen.add(session.session_id)
             self._settle_session(session)
         for session in store.get_exhausted_sessions():
+            if session.session_id in seen:
+                continue
+            seen.add(session.session_id)
             self._settle_session(session)
+        for session in self._get_deadline_ready_sessions():
+            if session.session_id in seen:
+                continue
+            self._settle_session(session)
+
+    def _get_deadline_ready_sessions(self) -> list[UptoSession]:
+        """Find sessions that should settle before the Permit2 signature expires."""
+        store = self._session_store
+        if store is None:
+            return []
+
+        sessions: list[UptoSession] = []
+        iter_active = getattr(store, "_iter_active_sessions", None)
+        if callable(iter_active):
+            try:
+                sessions = list(iter_active())
+            except Exception:
+                logger.exception("Failed to scan active sessions for Permit2 deadlines")
+                return []
+        else:
+            raw_sessions = getattr(store, "_sessions", None)
+            if isinstance(raw_sessions, dict):
+                lock = getattr(store, "_lock", None)
+                if lock is not None:
+                    with lock:
+                        sessions = list(raw_sessions.values())
+                else:
+                    sessions = list(raw_sessions.values())
+
+        now = int(time.time())
+        ready: list[UptoSession] = []
+        for session in sessions:
+            if session.settled or session.settling or session.accumulated_cost <= 0:
+                continue
+            deadline = _extract_upto_permit2_deadline(session)
+            if deadline is None:
+                continue
+            if deadline <= now + self._session_deadline_buffer:
+                ready.append(session)
+        return ready
 
     def _settle_session(self, session: UptoSession) -> None:
         """Settle a single session on-chain via the facilitator."""
@@ -1922,7 +2274,14 @@ class PaymentMiddleware:
         try:
             payload = PaymentPayload.model_validate(session.permit_payload)
             requirements = PaymentRequirements.model_validate(session.requirements)
-            overrides = SettlementOverrides(amount=str(session.accumulated_cost))
+            usage_metadata = dict(session.usage_metadata or {})
+            if usage_metadata:
+                usage_metadata.setdefault("session_id", session.session_id)
+                usage_metadata.setdefault("cost_opg", str(session.accumulated_cost))
+            overrides = SettlementOverrides(
+                amount=str(session.accumulated_cost),
+                usage_metadata=usage_metadata or None,
+            )
 
             settle_result = self._http_server.process_settlement(
                 payload,
@@ -1991,7 +2350,9 @@ def payment_middleware(
     session_store: SessionStoreProtocol | None = None,
     session_cost_calculator: Callable[[dict[str, Any]], int] | None = None,
     cost_per_request: int | None = None,
-    session_idle_timeout: int = 3600,
+    session_idle_timeout: int = DEFAULT_SESSION_IDLE_TIMEOUT,
+    session_reaper_interval: int = DEFAULT_SESSION_REAPER_INTERVAL,
+    session_deadline_buffer: int = DEFAULT_SESSION_DEADLINE_BUFFER,
 ) -> PaymentMiddleware:
     """Create Flask payment middleware with pre-configured server.
 
@@ -2006,6 +2367,8 @@ def payment_middleware(
         session_cost_calculator: Callback for per-request cost calculation.
         cost_per_request: Static fallback cost per request.
         session_idle_timeout: Idle timeout before session is settled.
+        session_reaper_interval: Seconds between background settlement checks.
+        session_deadline_buffer: Seconds before Permit2 deadline to force settlement.
 
     Returns:
         PaymentMiddleware instance.
@@ -2021,6 +2384,8 @@ def payment_middleware(
         session_cost_calculator=session_cost_calculator,
         cost_per_request=cost_per_request,
         session_idle_timeout=session_idle_timeout,
+        session_reaper_interval=session_reaper_interval,
+        session_deadline_buffer=session_deadline_buffer,
     )
 
 

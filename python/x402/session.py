@@ -12,6 +12,38 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
+_ACCUMULATED_USAGE_INT_FIELDS = {
+    "request_count",
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+}
+
+
+def _add_int_usage_field(
+    current: dict[str, Any],
+    usage_metadata: dict[str, Any],
+    field: str,
+    *,
+    default: int | None = None,
+) -> None:
+    raw_value = usage_metadata.get(field, default)
+    if raw_value is None:
+        return
+
+    try:
+        increment = int(raw_value)
+    except (TypeError, ValueError):
+        return
+    if increment < 0:
+        return
+
+    try:
+        existing = int(current.get(field, 0) or 0)
+    except (TypeError, ValueError):
+        existing = 0
+    current[field] = existing + increment
+
 
 @dataclass
 class UptoSession:
@@ -29,6 +61,8 @@ class UptoSession:
     """Maximum amount the client signed for (spend cap)."""
     accumulated_cost: int = 0
     """Total cost accumulated across all requests in this session."""
+    usage_metadata: dict[str, Any] = field(default_factory=dict)
+    """Aggregate inference usage metadata accumulated across this session."""
     created_at: float = field(default_factory=time.time)
     last_activity: float = field(default_factory=time.time)
     settled: bool = False
@@ -60,6 +94,7 @@ class UptoSession:
             "requirements": self.requirements,
             "max_amount": self.max_amount,
             "accumulated_cost": self.accumulated_cost,
+            "usage_metadata": self.usage_metadata,
             "created_at": self.created_at,
             "last_activity": self.last_activity,
             "settled": self.settled,
@@ -78,6 +113,7 @@ class UptoSession:
             requirements=data["requirements"],
             max_amount=int(data["max_amount"]),
             accumulated_cost=int(data["accumulated_cost"]),
+            usage_metadata=dict(data.get("usage_metadata") or {}),
             created_at=float(data["created_at"]),
             last_activity=float(data["last_activity"]),
             settled=bool(data.get("settled", False)),
@@ -192,6 +228,129 @@ class SessionStore:
                 return False
             session.accumulated_cost += cost
             session.last_activity = time.time()
+            return True
+
+    @staticmethod
+    def _merge_usage_metadata_locked(
+        session: UptoSession, usage_metadata: dict[str, Any]
+    ) -> None:
+        """Merge one request's usage metadata into a session (lock held).
+
+        Numeric fields are accumulated; stable descriptive fields keep their
+        first value unless a later request supplies a new value for an empty
+        slot. This intentionally stores only coarse session-level metrics.
+        """
+        current = session.usage_metadata
+        for field in _ACCUMULATED_USAGE_INT_FIELDS:
+            _add_int_usage_field(current, usage_metadata, field)
+
+        raw_cost_usd = usage_metadata.get("cost_usd")
+        if raw_cost_usd is not None:
+            try:
+                current["cost_usd"] = float(current.get("cost_usd", 0) or 0) + float(
+                    raw_cost_usd
+                )
+            except (TypeError, ValueError):
+                pass
+
+        raw_cost_opg = usage_metadata.get("cost_opg")
+        if raw_cost_opg is not None:
+            try:
+                current["cost_opg"] = str(
+                    int(str(current.get("cost_opg", "0") or "0")) + int(str(raw_cost_opg))
+                )
+            except (TypeError, ValueError):
+                pass
+
+        for key, value in usage_metadata.items():
+            if (
+                key in _ACCUMULATED_USAGE_INT_FIELDS
+                or key in {"cost_usd", "cost_opg"}
+                or value is None
+            ):
+                continue
+            if current.get(key) in (None, ""):
+                current[key] = value
+
+    def add_usage(self, session_id: str, usage_metadata: dict[str, Any]) -> bool:
+        """Merge aggregate usage metadata into a session.
+
+        See :meth:`_merge_usage_metadata_locked` for merge semantics.
+        """
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None or session.settled or session.settling:
+                return False
+
+            self._merge_usage_metadata_locked(session, usage_metadata)
+            session.last_activity = time.time()
+            return True
+
+    def add_cost_and_usage(
+        self, session_id: str, cost: int, usage_metadata: dict[str, Any]
+    ) -> bool:
+        """Atomically add cost and merge usage metadata under one lock.
+
+        Equivalent to a successful :meth:`add_cost` followed by
+        :meth:`add_usage`, but the reaper cannot claim the session for
+        settlement in between — which would settle the cost without this
+        request's request_count/tokens. Nothing is recorded when the cost
+        would exceed the cap.
+
+        Args:
+            session_id: The session identifier.
+            cost: Cost to add (in token smallest unit).
+            usage_metadata: This request's usage metadata to merge.
+
+        Returns:
+            True if the cost fit under the cap and both were recorded.
+        """
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None or session.settled or session.settling:
+                return False
+            if session.accumulated_cost + cost > session.max_amount:
+                return False
+
+            session.accumulated_cost += cost
+            self._merge_usage_metadata_locked(session, usage_metadata)
+            session.last_activity = time.time()
+            return True
+
+    def record_served_request(
+        self, session_id: str, usage_metadata: dict[str, Any]
+    ) -> bool:
+        """Count a served (2xx) response that was not billed.
+
+        Unlike :meth:`add_usage`, this records only the served-request count
+        and descriptive fields — never the cost — and does NOT refresh
+        ``last_activity``. Billing and idle-timeout liveness are owned by
+        :meth:`add_cost`; this exists so ``request_count`` reflects every
+        inference actually served, including ones where the spend cap was
+        exceeded or the computed cost was zero. Refuses once a session has
+        been claimed for settlement so the settlement snapshot stays
+        consistent.
+        """
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None or session.settled or session.settling:
+                return False
+
+            current = session.usage_metadata
+            _add_int_usage_field(current, usage_metadata, "request_count", default=1)
+            for field in _ACCUMULATED_USAGE_INT_FIELDS - {"request_count"}:
+                _add_int_usage_field(current, usage_metadata, field)
+
+            for key, value in usage_metadata.items():
+                if (
+                    key in _ACCUMULATED_USAGE_INT_FIELDS
+                    or key in {"cost_usd", "cost_opg"}
+                    or value is None
+                ):
+                    continue
+                if current.get(key) in (None, ""):
+                    current[key] = value
+
             return True
 
     def close_session(self, session_id: str) -> UptoSession | None:

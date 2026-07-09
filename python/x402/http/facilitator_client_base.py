@@ -92,6 +92,7 @@ class FacilitatorClient(Protocol):
         requirements: PaymentRequirements | PaymentRequirementsV1,
         settlement_type: str | None = None,
         settlement_data: str | None = None,
+        usage_metadata: dict[str, Any] | None = None,
     ) -> SettleResponse:
         """Settle a payment."""
         ...
@@ -126,6 +127,7 @@ class FacilitatorClientSync(Protocol):
         requirements: PaymentRequirements | PaymentRequirementsV1,
         settlement_type: str | None = None,
         settlement_data: str | None = None,
+        usage_metadata: dict[str, Any] | None = None,
     ) -> SettleResponse:
         """Settle a payment."""
         ...
@@ -215,13 +217,17 @@ class HTTPFacilitatorClientBase:
         version: int,
         payload_dict: dict[str, Any],
         requirements_dict: dict[str, Any],
+        usage_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build request body for verify/settle."""
-        return {
+        body = {
             "x402Version": version,
             "paymentPayload": self._to_json_safe(payload_dict),
             "paymentRequirements": self._to_json_safe(requirements_dict),
         }
+        if usage_metadata:
+            body["usageMetadata"] = self._to_json_safe(usage_metadata)
+        return body
 
     def _get_verify_headers(self) -> dict[str, str]:
         """Get headers for verify request."""

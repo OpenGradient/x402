@@ -40,6 +40,8 @@ from .schemas import (
 if TYPE_CHECKING:
     pass
 
+DEFAULT_MAX_TIMEOUT_SECONDS = 3600
+
 # ============================================================================
 # FacilitatorClient Protocols (Async and Sync)
 # ============================================================================
@@ -62,6 +64,7 @@ class FacilitatorClient(Protocol):
         requirements: PaymentRequirements,
         settlement_type: str | None = None,
         settlement_data: str | None = None,
+        usage_metadata: dict[str, Any] | None = None,
     ) -> SettleResponse:
         """Settle a payment (async)."""
         ...
@@ -96,6 +99,7 @@ class FacilitatorClientSync(Protocol):
         requirements: PaymentRequirements,
         settlement_type: str | None = None,
         settlement_data: str | None = None,
+        usage_metadata: dict[str, Any] | None = None,
     ) -> SettleResponse:
         """Settle a payment."""
         ...
@@ -344,7 +348,7 @@ class x402ResourceServerBase:
             asset=asset_amount.asset,
             amount=asset_amount.amount,
             pay_to=config.pay_to,
-            max_timeout_seconds=config.max_timeout_seconds or 300,
+            max_timeout_seconds=config.max_timeout_seconds or DEFAULT_MAX_TIMEOUT_SECONDS,
             extra={
                 **(asset_amount.extra or {}),
                 **(config.extra or {}),

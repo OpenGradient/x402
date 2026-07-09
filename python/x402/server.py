@@ -127,6 +127,19 @@ def _settle_accepts_metadata(settle_method: Any) -> bool:
     return "settlement_type" in params and "settlement_data" in params
 
 
+def _settle_accepts_usage_metadata(settle_method: Any) -> bool:
+    """Return True when settle() supports usage metadata kwargs."""
+    try:
+        signature = inspect.signature(settle_method)
+    except (TypeError, ValueError):
+        return False
+
+    params = signature.parameters
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return True
+    return "usage_metadata" in params
+
+
 def _settle_data_accepts_payload(settle_data_method: Any) -> bool:
     """Return True when settle_data() supports settlement_data argument."""
     try:
@@ -157,16 +170,18 @@ async def _call_async_settle(
     requirements: PaymentRequirements | PaymentRequirementsV1,
     settlement_type: str | None,
     settlement_data: str | None,
+    usage_metadata: dict[str, Any] | None = None,
 ) -> Any:
     """Call async facilitator settle() with backward-compatible kwargs."""
     settle_method = target.settle
     if _settle_accepts_metadata(settle_method):
-        return await settle_method(
-            payload,
-            requirements,
-            settlement_type=settlement_type,
-            settlement_data=settlement_data,
-        )
+        kwargs: dict[str, Any] = {
+            "settlement_type": settlement_type,
+            "settlement_data": settlement_data,
+        }
+        if _settle_accepts_usage_metadata(settle_method):
+            kwargs["usage_metadata"] = usage_metadata
+        return await settle_method(payload, requirements, **kwargs)
     return await settle_method(payload, requirements)
 
 
@@ -176,16 +191,18 @@ def _call_sync_settle(
     requirements: PaymentRequirements | PaymentRequirementsV1,
     settlement_type: str | None,
     settlement_data: str | None,
+    usage_metadata: dict[str, Any] | None = None,
 ) -> Any:
     """Call sync facilitator settle() with backward-compatible kwargs."""
     settle_method = target.settle
     if _settle_accepts_metadata(settle_method):
-        return settle_method(
-            payload,
-            requirements,
-            settlement_type=settlement_type,
-            settlement_data=settlement_data,
-        )
+        kwargs: dict[str, Any] = {
+            "settlement_type": settlement_type,
+            "settlement_data": settlement_data,
+        }
+        if _settle_accepts_usage_metadata(settle_method):
+            kwargs["usage_metadata"] = usage_metadata
+        return settle_method(payload, requirements, **kwargs)
     return settle_method(payload, requirements)
 
 
@@ -354,7 +371,7 @@ class x402ResourceServer(x402ResourceServerBase):
                     if method_name == "verify":
                         result = await target.verify(p, r)
                     else:
-                        result = await _call_async_settle(target, p, r, None, None)
+                        result = await _call_async_settle(target, p, r, None, None, None)
                 else:
                     result = await self._execute_hook(target, ctx)
         except StopIteration as e:
@@ -373,6 +390,7 @@ class x402ResourceServer(x402ResourceServerBase):
         requirements_bytes: bytes | None = None,
         settlement_type: str | None = None,
         settlement_data: str | None = None,
+        usage_metadata: dict[str, Any] | None = None,
     ) -> SettleResponse:
         """Settle a payment via facilitator.
 
@@ -416,6 +434,7 @@ class x402ResourceServer(x402ResourceServerBase):
                             r,
                             settlement_type,
                             settlement_data,
+                            usage_metadata,
                         )
                 else:
                     result = await self._execute_hook(target, ctx)
@@ -594,7 +613,7 @@ class x402ResourceServerSync(x402ResourceServerBase):
                     if method_name == "verify":
                         result = target.verify(p, r)
                     else:
-                        result = _call_sync_settle(target, p, r, None, None)
+                        result = _call_sync_settle(target, p, r, None, None, None)
                 else:
                     result = self._execute_hook_sync(target, ctx)
         except StopIteration as e:
@@ -613,6 +632,7 @@ class x402ResourceServerSync(x402ResourceServerBase):
         requirements_bytes: bytes | None = None,
         settlement_type: str | None = None,
         settlement_data: str | None = None,
+        usage_metadata: dict[str, Any] | None = None,
     ) -> SettleResponse:
         """Settle a payment via facilitator.
 
@@ -656,6 +676,7 @@ class x402ResourceServerSync(x402ResourceServerBase):
                             r,
                             settlement_type,
                             settlement_data,
+                            usage_metadata,
                         )
                 else:
                     result = self._execute_hook_sync(target, ctx)

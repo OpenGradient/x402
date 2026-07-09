@@ -218,6 +218,25 @@ class RedisSessionStore:
                     exhausted.append(session)
         return exhausted
 
+    def get_settlement_due_sessions(
+        self, safety_margin_seconds: int
+    ) -> list[UptoSession]:
+        now = time.time()
+        due: list[UptoSession] = []
+        for session in self._iter_active_sessions():
+            if session.settled:
+                continue
+            deadline = session.settlement_deadline
+            if deadline is not None and now >= deadline - safety_margin_seconds:
+                # Atomically claim to prevent duplicate settlement
+                claimed = self._claim_script(
+                    keys=[self._session_key(session.session_id)],
+                    args=[],
+                )
+                if claimed is not None:
+                    due.append(session)
+        return due
+
     @property
     def active_count(self) -> int:
         count = 0

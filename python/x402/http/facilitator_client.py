@@ -6,8 +6,10 @@ implementations for communicating with remote facilitator services.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import time
 from typing import TYPE_CHECKING, Any, TypeVar
 
 logger = logging.getLogger("x402.facilitator_client")
@@ -115,6 +117,83 @@ def _parse_async_settle_acceptance(
         network=requirements_dict["network"],
         amount=requirements_dict.get("amount"),
     )
+
+
+def _extract_job_id(response: Any) -> str | None:
+    """Pull the settlement job id out of a facilitator 202 acceptance body."""
+    try:
+        response_data = response.json()
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return None
+    if not isinstance(response_data, dict):
+        return None
+    payment_job = response_data.get("paymentJob") or response_data.get("settlementJob")
+    if isinstance(payment_job, dict):
+        job_id = payment_job.get("jobId")
+        if isinstance(job_id, str) and job_id:
+            return job_id
+    return None
+
+
+def _settle_response_from_job_status(
+    status_body: Any,
+    requirements_dict: dict[str, Any],
+) -> SettleResponse | None:
+    """Map a ``GET /settle/:jobId`` body to a terminal SettleResponse.
+
+    The facilitator marks a settlement job "succeeded" once the worker finishes
+    even when the worker returned ``success: false`` (e.g. the on-chain settle
+    reverted because the authorization expired). We therefore inspect the
+    embedded ``result.success`` rather than trusting the job state alone.
+
+    Returns:
+        A terminal SettleResponse, or ``None`` if the job is still pending and
+        polling should continue.
+    """
+    if not isinstance(status_body, dict):
+        return None
+
+    status = status_body.get("status")
+    network = requirements_dict["network"]
+
+    if status == "succeeded":
+        result = status_body.get("result")
+        if isinstance(result, dict):
+            transaction = result.get("transaction") or status_body.get("txHash") or ""
+            if result.get("success"):
+                return SettleResponse(
+                    success=True,
+                    transaction=transaction,
+                    network=result.get("network") or network,
+                    payer=result.get("payer"),
+                    amount=result.get("amount") or requirements_dict.get("amount"),
+                )
+            return SettleResponse(
+                success=False,
+                transaction=transaction,
+                network=result.get("network") or network,
+                error_reason=result.get("errorReason") or "settlement_failed",
+                error_message=result.get("errorMessage"),
+                payer=result.get("payer"),
+            )
+        # Completed with no structured result — fail closed rather than assume success.
+        return SettleResponse(
+            success=False,
+            transaction=str(status_body.get("txHash") or ""),
+            network=network,
+            error_reason="settlement_result_missing",
+        )
+
+    if status == "failed":
+        return SettleResponse(
+            success=False,
+            transaction="",
+            network=network,
+            error_reason=status_body.get("error") or "settlement_failed",
+        )
+
+    # queued / processing / unknown → not terminal yet.
+    return None
 
 
 # ============================================================================
@@ -353,12 +432,60 @@ class HTTPFacilitatorClient(HTTPFacilitatorClientBase):
         )
 
         if response.status_code == 202:
-            return _parse_async_settle_acceptance(response, requirements_dict)
+            if not self._wait_for_settlement:
+                return _parse_async_settle_acceptance(response, requirements_dict)
+            job_id = _extract_job_id(response)
+            if job_id is None:
+                logger.warning(
+                    "SETTLE_HTTP: 202 acceptance had no job id; cannot confirm settlement"
+                )
+                return _parse_async_settle_acceptance(response, requirements_dict)
+            return await self._poll_settlement_job(job_id, requirements_dict)
 
         if response.status_code != 200:
             raise ValueError(f"Facilitator settle failed ({response.status_code}): {response.text}")
 
         return _parse_facilitator_response(response, SettleResponse, "settle")
+
+    async def _poll_settlement_job(
+        self,
+        job_id: str,
+        requirements_dict: dict[str, Any],
+    ) -> SettleResponse:
+        """Poll ``GET /settle/:jobId`` until the settlement is terminal (async)."""
+        client = self._get_async_client()
+        url = f"{self._url}/settle/{job_id}"
+        deadline = time.monotonic() + self._settlement_poll_timeout
+
+        while True:
+            try:
+                response = await client.get(url, headers=self._get_settle_headers())
+                if response.status_code == 200:
+                    result = _settle_response_from_job_status(response.json(), requirements_dict)
+                    if result is not None:
+                        return result
+                elif response.status_code != 404:
+                    logger.warning(
+                        "SETTLE_POLL: unexpected status=%d for job %s",
+                        response.status_code,
+                        job_id,
+                    )
+            except (json.JSONDecodeError, ValueError, TypeError) as exc:
+                logger.warning("SETTLE_POLL: bad status body for job %s: %s", job_id, exc)
+
+            if time.monotonic() >= deadline:
+                logger.error(
+                    "SETTLE_POLL: settlement job %s did not confirm within %.0fs",
+                    job_id,
+                    self._settlement_poll_timeout,
+                )
+                return SettleResponse(
+                    success=False,
+                    transaction=job_id,
+                    network=requirements_dict["network"],
+                    error_reason="settlement_timeout",
+                )
+            await asyncio.sleep(self._settlement_poll_interval)
 
     async def _settle_data_http(
         self,
@@ -612,7 +739,15 @@ class HTTPFacilitatorClientSync(HTTPFacilitatorClientBase):
         logger.info("SETTLE_HTTP: response status=%d", response.status_code)
 
         if response.status_code == 202:
-            return _parse_async_settle_acceptance(response, requirements_dict)
+            if not self._wait_for_settlement:
+                return _parse_async_settle_acceptance(response, requirements_dict)
+            job_id = _extract_job_id(response)
+            if job_id is None:
+                logger.warning(
+                    "SETTLE_HTTP: 202 acceptance had no job id; cannot confirm settlement"
+                )
+                return _parse_async_settle_acceptance(response, requirements_dict)
+            return self._poll_settlement_job(job_id, requirements_dict)
 
         if response.status_code != 200:
             logger.error(
@@ -623,6 +758,51 @@ class HTTPFacilitatorClientSync(HTTPFacilitatorClientBase):
             raise ValueError(f"Facilitator settle failed ({response.status_code}): {response.text}")
 
         return _parse_facilitator_response(response, SettleResponse, "settle")
+
+    def _poll_settlement_job(
+        self,
+        job_id: str,
+        requirements_dict: dict[str, Any],
+    ) -> SettleResponse:
+        """Poll ``GET /settle/:jobId`` until the settlement is terminal.
+
+        Returns a failure SettleResponse (rather than optimistically reporting
+        success) if the job reverts or does not confirm within the timeout, so
+        the caller can keep the session for retry / re-challenge.
+        """
+        client = self._get_client()
+        url = f"{self._url}/settle/{job_id}"
+        deadline = time.monotonic() + self._settlement_poll_timeout
+
+        while True:
+            try:
+                response = client.get(url, headers=self._get_settle_headers())
+                if response.status_code == 200:
+                    result = _settle_response_from_job_status(response.json(), requirements_dict)
+                    if result is not None:
+                        return result
+                elif response.status_code != 404:
+                    logger.warning(
+                        "SETTLE_POLL: unexpected status=%d for job %s",
+                        response.status_code,
+                        job_id,
+                    )
+            except (json.JSONDecodeError, ValueError, TypeError) as exc:
+                logger.warning("SETTLE_POLL: bad status body for job %s: %s", job_id, exc)
+
+            if time.monotonic() >= deadline:
+                logger.error(
+                    "SETTLE_POLL: settlement job %s did not confirm within %.0fs",
+                    job_id,
+                    self._settlement_poll_timeout,
+                )
+                return SettleResponse(
+                    success=False,
+                    transaction=job_id,
+                    network=requirements_dict["network"],
+                    error_reason="settlement_timeout",
+                )
+            time.sleep(self._settlement_poll_interval)
 
     def _settle_data_http(
         self,

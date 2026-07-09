@@ -52,6 +52,48 @@ class UptoSession:
         """Whether the spend cap has been fully consumed."""
         return self.accumulated_cost >= self.max_amount
 
+    @property
+    def settlement_deadline(self) -> float | None:
+        """Absolute unix time by which this session MUST be settled on-chain.
+
+        A draw-down session reuses a single signed payment authorization whose
+        deadline is fixed at signing time and never refreshed. If we settle
+        after that deadline the on-chain ``settle`` reverts (e.g. Permit2
+        ``deadline`` expired / EIP-3009 ``validBefore`` passed) and the whole
+        accumulated tab is silently lost. This returns the hard deadline so the
+        reaper can force settlement *before* it, preferring the exact value
+        embedded in the signed payload and falling back to
+        ``created_at + max validity window`` from the requirements.
+
+        Returns:
+            Unix timestamp (seconds) of the authorization deadline, or ``None``
+            if it cannot be determined.
+        """
+        # Prefer the exact signed deadline from the payment payload.
+        try:
+            inner = self.permit_payload.get("payload", {})
+            auth = inner.get("permit2Authorization") or inner.get("authorization")
+            if isinstance(auth, dict):
+                raw = auth.get("deadline")
+                if raw is None:
+                    raw = auth.get("validBefore")
+                if raw is not None:
+                    return float(int(raw))
+        except (AttributeError, TypeError, ValueError):
+            pass
+
+        # Fall back to created_at + the requirement's advertised validity window.
+        max_timeout = self.requirements.get("maxTimeoutSeconds")
+        if max_timeout is None:
+            max_timeout = self.requirements.get("max_timeout_seconds")
+        try:
+            if max_timeout is not None:
+                return self.created_at + float(int(max_timeout))
+        except (TypeError, ValueError):
+            pass
+
+        return None
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize session to a dict (for Redis/JSON storage)."""
         return {
@@ -112,6 +154,8 @@ class SessionStoreProtocol(Protocol):
     def get_expired_sessions(self, idle_timeout_seconds: int) -> list[UptoSession]: ...
 
     def get_exhausted_sessions(self) -> list[UptoSession]: ...
+
+    def get_settlement_due_sessions(self, safety_margin_seconds: int) -> list[UptoSession]: ...
 
     @property
     def active_count(self) -> int: ...
@@ -270,6 +314,30 @@ class SessionStore:
                 if session.is_exhausted:
                     exhausted.append(session)
         return exhausted
+
+    def get_settlement_due_sessions(self, safety_margin_seconds: int) -> list[UptoSession]:
+        """Get unsettled sessions whose signed authorization deadline is near.
+
+        These must be force-settled regardless of idle/exhaustion state, or the
+        on-chain settlement will revert as expired and the tab will be lost.
+
+        Args:
+            safety_margin_seconds: Settle this many seconds before the
+                authorization deadline to leave room for on-chain confirmation.
+
+        Returns:
+            List of sessions that should be settled now (deadline approaching).
+        """
+        now = time.time()
+        due: list[UptoSession] = []
+        with self._lock:
+            for session in self._sessions.values():
+                if session.settled or session.settling:
+                    continue
+                deadline = session.settlement_deadline
+                if deadline is not None and now >= deadline - safety_margin_seconds:
+                    due.append(session)
+        return due
 
     @property
     def active_count(self) -> int:

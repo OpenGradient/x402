@@ -157,6 +157,15 @@ class FacilitatorConfig:
     http_client: Any = None  # Optional httpx.Client or httpx.AsyncClient
     auth_provider: AuthProvider | None = None
     identifier: str | None = None
+    # Async settlement (facilitator returns 202 + a job id) handling.
+    # When True, ``settle`` polls the facilitator's job-status endpoint until
+    # the settlement reaches a terminal on-chain state instead of optimistically
+    # reporting success the moment the job is enqueued. Callers that settle in a
+    # background context (e.g. the session reaper) should enable this so a
+    # revert/expiry is surfaced as a real failure rather than silently dropped.
+    wait_for_settlement: bool = False
+    settlement_poll_interval: float = 2.0
+    settlement_poll_timeout: float = 120.0
 
 
 # ============================================================================
@@ -180,6 +189,9 @@ class HTTPFacilitatorClientBase:
             self._identifier = self._url
             self._http_client = None
             self._owns_client = True
+            self._wait_for_settlement = bool(config.get("wait_for_settlement", False))
+            self._settlement_poll_interval = float(config.get("settlement_poll_interval", 2.0))
+            self._settlement_poll_timeout = float(config.get("settlement_poll_timeout", 120.0))
         else:
             config = config or FacilitatorConfig()
 
@@ -189,6 +201,9 @@ class HTTPFacilitatorClientBase:
             self._identifier = config.identifier or self._url
             self._http_client = config.http_client
             self._owns_client = config.http_client is None
+            self._wait_for_settlement = config.wait_for_settlement
+            self._settlement_poll_interval = config.settlement_poll_interval
+            self._settlement_poll_timeout = config.settlement_poll_timeout
 
     @property
     def url(self) -> str:

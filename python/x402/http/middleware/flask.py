@@ -21,6 +21,7 @@ import json
 import logging
 import re
 import threading
+import time
 from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any
 
@@ -769,6 +770,7 @@ class PaymentMiddleware:
         session_cost_calculator: Callable[[dict[str, Any]], int] | None = None,
         cost_per_request: int | None = None,
         session_idle_timeout: int = 3600,
+        settlement_safety_margin: int = 60,
     ) -> None:
         """Initialize Flask payment middleware.
 
@@ -784,6 +786,13 @@ class PaymentMiddleware:
                 computing per-request cost in token smallest units.
             cost_per_request: Static fallback cost when calculator is absent.
             session_idle_timeout: Seconds before an idle session is settled.
+            settlement_safety_margin: Seconds before a session's signed
+                authorization deadline at which the reaper force-settles it
+                (and stops accepting new draw-downs against it). Guards against
+                a long-lived session outliving its own Permit2/EIP-3009
+                deadline, which would make the on-chain settlement revert and
+                silently drop the tab. Must be smaller than the advertised
+                ``max_timeout_seconds`` for a route.
         """
         # Auto-register bazaar extension if routes declare it
         if _check_if_bazaar_needed(routes):
@@ -805,6 +814,7 @@ class PaymentMiddleware:
         self._session_cost_calculator = session_cost_calculator
         self._cost_per_request = cost_per_request
         self._session_idle_timeout = session_idle_timeout
+        self._settlement_safety_margin = settlement_safety_margin
         self._payment_to_session: dict[str, str] = {}
         self._session_map_lock = threading.Lock()
         self._reaper_thread: threading.Thread | None = None
@@ -960,8 +970,14 @@ class PaymentMiddleware:
 
         if session_id:
             session = store.get_session(session_id)
-            if session is None or session.settled or session.is_exhausted:
-                # Session gone or used up — require new payment
+            if (
+                session is None
+                or session.settled
+                or session.is_exhausted
+                or self._session_needs_resign(session)
+            ):
+                # Session gone, used up, or nearing its authorization deadline —
+                # require a new payment so the client re-signs a fresh window.
                 start_response(
                     "402 Payment Required",
                     [("Content-Type", "application/json")],
@@ -999,6 +1015,19 @@ class PaymentMiddleware:
         )
 
 
+    def _session_needs_resign(self, session: UptoSession) -> bool:
+        """Whether a session is too close to its authorization deadline to reuse.
+
+        Once within the settlement safety margin, the reaper will force-settle
+        the accumulated tab; we must stop accepting new draw-downs so the
+        settled amount is final and the client re-signs a fresh authorization
+        (fresh deadline) instead of piling cost onto an expiring one.
+        """
+        deadline = session.settlement_deadline
+        if deadline is None:
+            return False
+        return time.time() >= deadline - self._settlement_safety_margin
+
     def _resume_session_request(
         self,
         environ: dict[str, Any],
@@ -1019,6 +1048,7 @@ class PaymentMiddleware:
             or session.settled
             or session.settling
             or session.is_exhausted
+            or self._session_needs_resign(session)
             or (session.route_method and session.route_method != context.method)
             or (session.route_path and session.route_path != context.path)
         ):
@@ -1481,7 +1511,10 @@ class PaymentMiddleware:
 
     def _reaper_loop(self) -> None:
         """Background loop that periodically settles ready sessions."""
-        interval = min(self._session_idle_timeout // 4, 30)
+        # Cadence must be fine-grained enough to catch a session before its
+        # authorization deadline, so it also tracks the safety margin.
+        cadence_basis = min(self._session_idle_timeout, self._settlement_safety_margin)
+        interval = min(cadence_basis // 4, 30)
         interval = max(interval, 5)
         while not self._reaper_stop.wait(timeout=interval):
             try:
@@ -1490,11 +1523,17 @@ class PaymentMiddleware:
                 logger.exception("Error in session reaper cycle")
 
     def _settle_ready_sessions(self) -> None:
-        """Settle all expired and exhausted sessions."""
+        """Settle all deadline-due, expired, and exhausted sessions."""
         store = self._session_store
         if store is None:
             return
 
+        # Deadline-approaching sessions first: they MUST settle before their
+        # signed authorization expires or the on-chain settle reverts.
+        get_due = getattr(store, "get_settlement_due_sessions", None)
+        if callable(get_due):
+            for session in get_due(self._settlement_safety_margin):
+                self._settle_session(session)
         for session in store.get_expired_sessions(self._session_idle_timeout):
             self._settle_session(session)
         for session in store.get_exhausted_sessions():
@@ -1589,6 +1628,7 @@ def payment_middleware(
     session_cost_calculator: Callable[[dict[str, Any]], int] | None = None,
     cost_per_request: int | None = None,
     session_idle_timeout: int = 3600,
+    settlement_safety_margin: int = 60,
 ) -> PaymentMiddleware:
     """Create Flask payment middleware with pre-configured server.
 
@@ -1603,6 +1643,8 @@ def payment_middleware(
         session_cost_calculator: Callback for per-request cost calculation.
         cost_per_request: Static fallback cost per request.
         session_idle_timeout: Idle timeout before session is settled.
+        settlement_safety_margin: Seconds before the signed authorization
+            deadline at which the reaper force-settles a session.
 
     Returns:
         PaymentMiddleware instance.
@@ -1618,6 +1660,7 @@ def payment_middleware(
         session_cost_calculator=session_cost_calculator,
         cost_per_request=cost_per_request,
         session_idle_timeout=session_idle_timeout,
+        settlement_safety_margin=settlement_safety_margin,
     )
 
 

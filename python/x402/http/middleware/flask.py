@@ -43,7 +43,7 @@ from ..types import (
 from ..x402_http_server import PaywallProvider, x402HTTPResourceServerSync
 from ...schemas import PaymentPayload, PaymentRequirements, SettlementOverrides
 from ...schemas.v1 import PaymentPayloadV1
-from ...session import SessionStoreProtocol, UptoSession
+from ...session import SessionStoreProtocol, UptoSession, signed_authorization_deadline
 
 if TYPE_CHECKING:
     from ...server import x402ResourceServerSync
@@ -992,6 +992,18 @@ class PaymentMiddleware:
             payload_dict = result.payment_payload.model_dump(by_alias=True)
             reqs_dict = result.payment_requirements.model_dump(by_alias=True)
             max_amount = int(result.payment_requirements.amount)
+            if not self._authorization_admissible(payload_dict):
+                # Refuse to open a draw-down session we cannot safely settle.
+                # We do NOT stream (and thus do not perform paid work) here.
+                start_response(
+                    "402 Payment Required",
+                    [("Content-Type", "application/json")],
+                )
+                return [
+                    json.dumps(
+                        {"error": "Payment authorization deadline missing or too soon"}
+                    ).encode()
+                ]
             session_id = store.create_session(
                 permit_payload=payload_dict,
                 requirements=reqs_dict,
@@ -1019,6 +1031,29 @@ class PaymentMiddleware:
         )
 
 
+    def _authorization_admissible(self, permit_payload: dict[str, Any]) -> bool:
+        """Whether a fresh authorization may open a draw-down session.
+
+        Strict / fail-closed — this gates paid work, so anything we cannot prove
+        safe is rejected:
+
+        * **Signed deadline required.** We admit only if the payload carries a
+          parseable *signed* deadline (Permit2 ``deadline`` / EIP-3009
+          ``validBefore``). We never fall back to ``created_at +
+          maxTimeoutSeconds`` for admission: that guess can outlive the true
+          on-chain deadline, so settlement would revert and the tab would be
+          lost. A malformed/absent deadline is a rejection, not an assumption.
+        * **Enough runway.** The signed deadline must be further out than the
+          settlement safety margin. Otherwise the session would be force-settled
+          (and require a re-sign) almost immediately, letting a client drive a
+          rapid settle/re-sign churn — each settlement a full-gas on-chain tx —
+          with an already-near-expiry authorization.
+        """
+        deadline = signed_authorization_deadline(permit_payload)
+        if deadline is None:
+            return False
+        return time.time() < deadline - self._settlement_safety_margin
+
     def _session_needs_resign(self, session: UptoSession) -> bool:
         """Whether a session is too close to its authorization deadline to reuse.
 
@@ -1026,10 +1061,16 @@ class PaymentMiddleware:
         the accumulated tab; we must stop accepting new draw-downs so the
         settled amount is final and the client re-signs a fresh authorization
         (fresh deadline) instead of piling cost onto an expiring one.
+
+        Keys off the *signed* deadline only (fail closed): reuse serves new paid
+        work, so we refuse rather than keep drawing down an authorization whose
+        on-chain deadline we cannot verify. The reaper still uses
+        ``settlement_deadline`` (with its advertised-window fallback) to settle
+        whatever tab already accumulated.
         """
-        deadline = session.settlement_deadline
+        deadline = session.signed_deadline
         if deadline is None:
-            return False
+            return True
         return time.time() >= deadline - self._settlement_safety_margin
 
     def _resume_session_request(

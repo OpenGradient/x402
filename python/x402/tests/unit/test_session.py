@@ -8,7 +8,11 @@ from __future__ import annotations
 
 import time
 
-from x402.session import SessionStore, UptoSession
+from x402.session import (
+    SessionStore,
+    UptoSession,
+    signed_authorization_deadline,
+)
 
 
 def _permit_payload(deadline: int) -> dict:
@@ -66,6 +70,59 @@ def test_settlement_deadline_none_when_undeterminable():
         max_amount=1000,
     )
     assert session.settlement_deadline is None
+
+
+def test_signed_deadline_reads_permit2_deadline():
+    """signed_deadline reflects the canonical Permit2 signed deadline."""
+    deadline = int(time.time()) + 300
+    session = UptoSession(
+        session_id="s1",
+        permit_payload=_permit_payload(deadline),
+        requirements=_requirements(),
+        max_amount=1000,
+    )
+    assert session.signed_deadline == float(deadline)
+
+
+def test_signed_deadline_reads_eip3009_valid_before():
+    """EIP-3009 authorizations expose the deadline as validBefore."""
+    valid_before = int(time.time()) + 300
+    session = UptoSession(
+        session_id="s2",
+        permit_payload={"payload": {"authorization": {"validBefore": str(valid_before)}}},
+        requirements=_requirements(),
+        max_amount=1000,
+    )
+    assert session.signed_deadline == float(valid_before)
+
+
+def test_signed_deadline_is_none_without_signed_value():
+    """signed_deadline never substitutes the advertised-window fallback.
+
+    settlement_deadline may guess from created_at + maxTimeoutSeconds, but
+    signed_deadline must stay None so admission decisions can fail closed.
+    """
+    session = UptoSession(
+        session_id="s3",
+        permit_payload={"payload": {"signature": "0xsig"}},  # no deadline
+        requirements=_requirements(max_timeout_seconds=450),
+        max_amount=1000,
+    )
+    assert session.signed_deadline is None
+    # ...while settlement_deadline still falls back for the reaper.
+    assert session.settlement_deadline == session.created_at + 450.0
+
+
+def test_signed_authorization_deadline_helper_rejects_malformed():
+    """The extractor returns None (not a guess) for absent/garbled deadlines."""
+    assert signed_authorization_deadline({"payload": {}}) is None
+    assert signed_authorization_deadline({}) is None
+    assert (
+        signed_authorization_deadline(
+            {"payload": {"permit2Authorization": {"deadline": "not-a-number"}}}
+        )
+        is None
+    )
 
 
 def test_get_settlement_due_sessions_returns_near_deadline_sessions():

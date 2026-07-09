@@ -973,11 +973,15 @@ class PaymentMiddleware:
             if (
                 session is None
                 or session.settled
+                or session.settling
                 or session.is_exhausted
                 or self._session_needs_resign(session)
             ):
-                # Session gone, used up, or nearing its authorization deadline —
-                # require a new payment so the client re-signs a fresh window.
+                # Session gone, being settled, used up, or nearing its
+                # authorization deadline — require a new payment so the client
+                # re-signs a fresh window. (settling must be terminal for reuse:
+                # add_cost() rejects settling sessions, so reusing one would
+                # serve a response without charging.)
                 start_response(
                     "402 Payment Required",
                     [("Content-Type", "application/json")],

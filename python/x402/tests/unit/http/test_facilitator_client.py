@@ -232,3 +232,31 @@ def test_sync_settle_waits_and_times_out_without_reporting_success():
     result = client.settle(make_v2_payload(), make_payment_requirements())
     assert result.success is False
     assert result.error_reason == "settlement_timeout"
+
+
+def test_negative_poll_values_are_clamped_dataclass_config():
+    """Negative poll interval/timeout must clamp to 0 (time.sleep rejects <0)."""
+    client = HTTPFacilitatorClientSync(
+        FacilitatorConfig(
+            url="https://facilitator.test",
+            wait_for_settlement=True,
+            settlement_poll_interval=-5.0,
+            settlement_poll_timeout=-1.0,
+        )
+    )
+    assert client._settlement_poll_interval == 0.0
+    assert client._settlement_poll_timeout == 0.0
+
+
+def test_negative_poll_values_are_clamped_dict_config():
+    """Same clamping applies when configured via a dict."""
+    client = HTTPFacilitatorClientSync(
+        {
+            "url": "https://facilitator.test",
+            "wait_for_settlement": True,
+            "settlement_poll_interval": -2.0,
+            "settlement_poll_timeout": -10.0,
+        }
+    )
+    assert client._settlement_poll_interval == 0.0
+    assert client._settlement_poll_timeout == 0.0

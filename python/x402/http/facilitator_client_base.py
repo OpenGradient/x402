@@ -190,8 +190,12 @@ class HTTPFacilitatorClientBase:
             self._http_client = None
             self._owns_client = True
             self._wait_for_settlement = bool(config.get("wait_for_settlement", False))
-            self._settlement_poll_interval = float(config.get("settlement_poll_interval", 2.0))
-            self._settlement_poll_timeout = float(config.get("settlement_poll_timeout", 120.0))
+            self._settlement_poll_interval = max(
+                0.0, float(config.get("settlement_poll_interval", 2.0))
+            )
+            self._settlement_poll_timeout = max(
+                0.0, float(config.get("settlement_poll_timeout", 120.0))
+            )
         else:
             config = config or FacilitatorConfig()
 
@@ -202,8 +206,8 @@ class HTTPFacilitatorClientBase:
             self._http_client = config.http_client
             self._owns_client = config.http_client is None
             self._wait_for_settlement = config.wait_for_settlement
-            self._settlement_poll_interval = config.settlement_poll_interval
-            self._settlement_poll_timeout = config.settlement_poll_timeout
+            self._settlement_poll_interval = max(0.0, float(config.settlement_poll_interval))
+            self._settlement_poll_timeout = max(0.0, float(config.settlement_poll_timeout))
 
     @property
     def url(self) -> str:

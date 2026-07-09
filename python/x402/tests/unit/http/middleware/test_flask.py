@@ -20,6 +20,7 @@ from x402.http.middleware.flask import (
     PaymentMiddleware,
     ResponseWrapper,
     _check_if_bazaar_needed,
+    _session_key_from_payment,
     payment_middleware,
 )
 from x402.http.types import (
@@ -30,6 +31,7 @@ from x402.http.types import (
     RouteConfig,
 )
 from x402.schemas import PaymentPayload, PaymentRequirements
+from x402.session import SessionStore
 
 # =============================================================================
 # Helpers
@@ -760,3 +762,94 @@ class TestFlaskMiddlewareIntegration:
                 assert response.get_json() == {
                     "error": "Facilitator settle returned invalid data: {'success': true}"
                 }
+
+
+class TestSessionReuseGuards:
+    """Session reuse must treat an in-progress settlement as terminal."""
+
+    @staticmethod
+    def _make_session(store: SessionStore, *, deadline_offset: int = 3600) -> str:
+        import time
+
+        now = int(time.time())
+        return store.create_session(
+            permit_payload={
+                "payload": {"permit2Authorization": {"deadline": str(now + deadline_offset)}}
+            },
+            requirements={"network": "eip155:8453", "maxTimeoutSeconds": deadline_offset},
+            max_amount=1000,
+        )
+
+    def test_settling_session_is_not_reused(self):
+        """A session mid-settlement must return 402 (re-pay), never be reused.
+
+        Reusing a settling session would serve a response while add_cost()
+        rejects the charge — i.e. free inference. Guards the fix that adds
+        `session.settling` to the _handle_session_mode reuse check.
+        """
+        app = Flask(__name__)
+        store = SessionStore()
+        middleware = PaymentMiddleware(
+            app,
+            {},
+            MagicMock(),
+            sync_facilitator_on_start=False,
+            session_store=store,
+        )
+
+        payment_header = "test-payment-header"
+        session_id = self._make_session(store)
+        middleware._payment_to_session[_session_key_from_payment(payment_header)] = session_id
+
+        # Claim the session for settlement (as the reaper would).
+        assert store.mark_settling(session_id) is True
+
+        captured: dict[str, Any] = {}
+
+        def start_response(status: str, headers: list) -> None:
+            captured["status"] = status
+
+        body = b"".join(
+            middleware._handle_session_mode(
+                {}, start_response, MagicMock(), MagicMock(), payment_header
+            )
+        )
+
+        assert captured["status"].startswith("402")
+        assert b"expired or exhausted" in body
+
+    def test_active_session_is_reused(self):
+        """Control: an active (not settling) session is reused, not 402'd."""
+        app = Flask(__name__)
+        store = SessionStore()
+        middleware = PaymentMiddleware(
+            app,
+            {},
+            MagicMock(),
+            sync_facilitator_on_start=False,
+            session_store=store,
+        )
+
+        payment_header = "test-payment-header"
+        session_id = self._make_session(store)
+        middleware._payment_to_session[_session_key_from_payment(payment_header)] = session_id
+
+        captured: dict[str, Any] = {}
+
+        def start_response(status: str, headers: list) -> None:
+            captured["status"] = status
+
+        # Stub out the streaming path — we only care that reuse was allowed
+        # (i.e. the guard did NOT short-circuit to 402).
+        with patch.object(
+            middleware, "_stream_session_response", return_value=iter([b"ok"])
+        ) as streamed:
+            body = b"".join(
+                middleware._handle_session_mode(
+                    {}, start_response, MagicMock(), MagicMock(), payment_header
+                )
+            )
+
+        streamed.assert_called_once()
+        assert body == b"ok"
+        assert "status" not in captured  # no 402 emitted here

@@ -62,10 +62,34 @@ def _channel_state_extra(
     return out
 
 
-def handle_before_settle(scheme: BatchSettlementEvmScheme, ctx: SettleContext):
-    """For voucher payloads: short-circuit settle by incrementing local charged total.
+def _charged_amount_for_settlement(ctx: SettleContext, fallback: str) -> str:
+    """Get the middleware-calculated cost without changing deposit funding.
 
-    Cooperative refund and deposit payloads fall through to the facilitator.
+    Batch deposits must be settled using their original requirements so the
+    signed escrow buffer is funded in full.  The Flask middleware attaches the
+    completed inference cost to the in-process transport context; that amount
+    is used only for the receiver's cumulative claim ledger.
+    """
+    transport_context = ctx.transport_context
+    raw_amount = getattr(
+        transport_context,
+        "_x402_batch_settlement_charge_amount",
+        None,
+    )
+    if raw_amount is None:
+        return fallback
+    amount = str(raw_amount)
+    if not _UINT_RE.fullmatch(amount):
+        raise ValueError("invalid batch settlement charged amount")
+    return amount
+
+
+def handle_before_settle(scheme: BatchSettlementEvmScheme, ctx: SettleContext):
+    """Reserve voucher charges locally; validate deposits before facilitator funding.
+
+    Deposit funding still goes to the facilitator with its full signed buffer.
+    The middleware-calculated amount is used only to validate the local claim
+    ledger. Cooperative refunds fall through unchanged.
     """
     from .....schemas import SettleResponse
     from .....schemas.hooks import AbortResult, SkipSettleResult
@@ -73,6 +97,18 @@ def handle_before_settle(scheme: BatchSettlementEvmScheme, ctx: SettleContext):
     payment_payload = ctx.payment_payload
     requirements = ctx.requirements
     raw = payment_payload.payload
+
+    if is_deposit_payload(raw):
+        voucher = raw["voucher"]
+        charge_amount = _charged_amount_for_settlement(ctx, str(requirements.amount))
+        channel = scheme.get_storage().get(voucher["channelId"])
+        if channel is not None and (
+            int(channel.charged_cumulative_amount) + int(charge_amount)
+            > int(voucher["maxClaimableAmount"])
+        ):
+            scheme.clear_pending_request(payment_payload)
+            return AbortResult(reason=ERR_CHARGE_EXCEEDS_SIGNED_CUMULATIVE)
+        return None
 
     if not is_voucher_payload(raw):
         return None
@@ -297,6 +333,7 @@ def handle_after_settle(scheme: BatchSettlementEvmScheme, ctx: SettleResultConte
         channel_state = read_channel_state_extra(extra)
         signed_max_claimable = str(voucher["maxClaimableAmount"])
         signature = voucher.get("signature", "0x")
+        charge_amount = _charged_amount_for_settlement(ctx, str(requirements.amount))
         now = _now_ms()
 
         def update_deposit(current: Channel | None) -> Channel | None:
@@ -306,7 +343,7 @@ def handle_after_settle(scheme: BatchSettlementEvmScheme, ctx: SettleResultConte
                 current.pending_request is None or current.pending_request.pending_id != pending_id
             ):
                 return current
-            charged_actual = str(int(current.charged_cumulative_amount) + int(requirements.amount))
+            charged_actual = str(int(current.charged_cumulative_amount) + int(charge_amount))
             next_ch = current.copy()
             next_ch.channel_config = channel_config
             next_ch.charged_cumulative_amount = charged_actual
@@ -363,7 +400,10 @@ def handle_enrich_settlement_response(
             "channelState": {
                 "chargedCumulativeAmount": channel.charged_cumulative_amount,
             },
-            "chargedAmount": ctx.requirements.amount,
+            "chargedAmount": _charged_amount_for_settlement(
+                ctx,
+                str(ctx.requirements.amount),
+            ),
         }
     return {
         "channelState": {

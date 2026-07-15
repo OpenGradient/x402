@@ -6,8 +6,12 @@ Uses x402HTTPResourceServerSync for synchronous request processing without async
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import io
 import json
 import logging
+import re
 import threading
 from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any
@@ -20,7 +24,7 @@ except ImportError as e:
     ) from e
 
 from ...schemas import SettleResponse, VerifiedPaymentCancelOptions
-from ..constants import SETTLEMENT_OVERRIDES_HEADER
+from ..constants import PAYMENT_RESPONSE_HEADER, SETTLEMENT_OVERRIDES_HEADER
 from ..facilitator_client_base import FacilitatorResponseError
 from ..types import (
     HTTPAdapter,
@@ -50,6 +54,109 @@ from ._bazaar_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+StreamingCostCalculator = Callable[[dict[str, Any]], int | str]
+StreamingReceiptEncoder = Callable[[dict[str, Any], dict[str, Any] | None], bytes]
+
+
+def _parse_json_bytes(data: bytes) -> Any | None:
+    try:
+        return json.loads(data) if data else None
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+
+def _parse_sse_final_json(data: bytes) -> dict[str, Any] | None:
+    last_json: dict[str, Any] | None = None
+    for line in data.decode("utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[len("data:") :].strip()
+        if payload == "[DONE]":
+            continue
+        try:
+            parsed = json.loads(payload)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(parsed, dict):
+            last_json = parsed
+    return last_json
+
+
+def _is_sse_done_event(event: bytes) -> bool:
+    for line in event.decode("utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if line.startswith("data:"):
+            return line[len("data:") :].strip() == "[DONE]"
+    return False
+
+
+def _encode_sse_event(name: str, payload: dict[str, Any]) -> bytes:
+    encoded = json.dumps(payload, separators=(",", ":"), default=str)
+    return f"event: {name}\ndata: {encoded}\n\n".encode()
+
+
+def _read_body_bytes(environ: dict[str, Any]) -> bytes:
+    try:
+        length = int(environ.get("CONTENT_LENGTH") or 0)
+    except (TypeError, ValueError):
+        length = 0
+    if length <= 0:
+        return b""
+    body = environ["wsgi.input"].read(length)
+    environ["wsgi.input"] = io.BytesIO(body)
+    return body
+
+
+def _sha256_bytes32(data: bytes) -> str:
+    return "0x" + hashlib.sha256(data).hexdigest()
+
+
+def _to_serializable_body(value: Any) -> Any:
+    try:
+        json.dumps(value)
+        return value
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _encode_settlement_data(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(payload, separators=(",", ":"), default=str).encode("utf-8")
+    return base64.b64encode(encoded).decode("ascii")
+
+
+def _normalize_settlement_type(raw_value: str | None) -> str | None:
+    if not raw_value:
+        return None
+    normalized = re.sub(r"[\s_-]+", "", raw_value).lower()
+    if normalized in {"private", "pivate"}:
+        return "private"
+    if normalized == "batch":
+        return "batch"
+    if normalized in {"individual", "inidvidual"}:
+        return "individual"
+    return None
+
+
+def _extract_eth_address_from_payment_payload(payment_payload: Any) -> str | None:
+    if not hasattr(payment_payload, "model_dump"):
+        return None
+    payload = payment_payload.model_dump(by_alias=True, exclude_none=True)
+    inner = payload.get("payload", {})
+    if not isinstance(inner, dict):
+        return None
+    authorization = inner.get("authorization")
+    if isinstance(authorization, dict):
+        address = authorization.get("from")
+        if isinstance(address, str) and address:
+            return address
+    permit2 = inner.get("permit2Authorization", inner.get("permit2_authorization"))
+    if isinstance(permit2, dict):
+        address = permit2.get("spender")
+        if isinstance(address, str) and address:
+            return address
+    return None
 
 # ============================================================================
 # Flask Adapter
@@ -240,6 +347,227 @@ class ResponseWrapper:
                 write(chunk)
 
 
+class StatusCapture:
+    """Capture WSGI response headers until either buffering or streaming is selected."""
+
+    def __init__(self, start_response: Callable[..., Any]) -> None:
+        self._start_response = start_response
+        self.status_code = 200
+        self.status: str | None = None
+        self.headers: list[tuple[str, str]] = []
+        self._write_chunks: list[bytes] = []
+        self._started = False
+
+    def __call__(
+        self,
+        status: str,
+        headers: list[tuple[str, str]],
+        exc_info: Any = None,
+    ) -> Callable[[bytes], None]:
+        self.status = status
+        self.status_code = int(status.split()[0])
+        self.headers = list(headers)
+
+        def buffered_write(data: bytes) -> None:
+            if data:
+                self._write_chunks.append(data)
+
+        return buffered_write
+
+    def add_header(self, name: str, value: str) -> None:
+        self.headers.append((name, value))
+
+    def start_streaming(self) -> Callable[[bytes], None]:
+        if self._started:
+            raise RuntimeError("WSGI response has already started")
+        self._started = True
+        return self._start_response(self.status, self.headers)
+
+    def send_response(self, body_chunks: list[bytes]) -> None:
+        write = self.start_streaming()
+        for chunk in self._write_chunks:
+            write(chunk)
+        for chunk in body_chunks:
+            if chunk:
+                write(chunk)
+
+
+class BatchSettlementStreamingResponse:
+    """Stream a batch payment response and settle its actual cost at completion."""
+
+    def __init__(
+        self,
+        upstream: Iterator[bytes],
+        middleware: PaymentMiddleware,
+        payment_payload: Any,
+        payment_requirements: Any,
+        declared_extensions: dict[str, Any] | None,
+        context: HTTPRequestContext,
+        transport_context: HTTPTransportContext,
+        request_body_bytes: bytes,
+        status_capture: StatusCapture,
+        dispatcher: Any,
+        requested_settlement_type: str | None,
+        streaming_cost_context: dict[str, Any] | None = None,
+        settlement_boundary: bytes | None = None,
+        receipt_encoder: StreamingReceiptEncoder | None = None,
+    ) -> None:
+        self._upstream = upstream
+        self._middleware = middleware
+        self._payment_payload = payment_payload
+        self._payment_requirements = payment_requirements
+        self._declared_extensions = declared_extensions
+        self._context = context
+        self._transport_context = transport_context
+        self._request_body_bytes = request_body_bytes
+        self._status_capture = status_capture
+        self._dispatcher = dispatcher
+        self._requested_settlement_type = requested_settlement_type
+        self._streaming_cost_context = streaming_cost_context
+        self._settlement_boundary = settlement_boundary
+        self._receipt_encoder = receipt_encoder
+        self._captured: list[bytes] = []
+        self._buffer = b""
+        self._done_event = b"data: [DONE]\n\n"
+        self._completed = False
+        self._saw_done_event = False
+
+    def _cancel_verified_payment(self, error: Exception | None = None) -> None:
+        """Release a channel reservation when streaming cannot settle it."""
+        if self._completed:
+            return
+        self._completed = True
+        if self._dispatcher is not None:
+            self._dispatcher.cancel_sync(
+                VerifiedPaymentCancelOptions(reason="handler_failed", error=error)
+            )
+
+    def __iter__(self) -> Iterator[bytes]:
+        try:
+            write = self._status_capture.start_streaming()
+            is_opaque_stream = self._settlement_boundary is not None
+            for chunk in self._status_capture._write_chunks:
+                self._captured.append(chunk)
+                write(chunk)
+            for chunk in self._upstream:
+                if not chunk:
+                    continue
+
+                # Opaque streaming transports (such as chunked OHTTP) cannot
+                # carry a late HTTP header. Their application yields this
+                # private boundary after it has computed the actual cost but
+                # before its final protocol chunk. Settle here, replace the
+                # boundary with a transport-specific private receipt frame,
+                # then continue streaming the final protocol chunk unchanged.
+                if self._settlement_boundary is not None and chunk == self._settlement_boundary:
+                    receipt = self._middleware._complete_batch_streaming_settlement(
+                        payment_payload=self._payment_payload,
+                        payment_requirements=self._payment_requirements,
+                        declared_extensions=self._declared_extensions,
+                        context=self._context,
+                        transport_context=self._transport_context,
+                        request_body_bytes=self._request_body_bytes,
+                        response_body_bytes=b"".join(self._captured),
+                        response_headers=dict(self._status_capture.headers),
+                        requested_settlement_type=self._requested_settlement_type,
+                        streaming_cost_context=self._streaming_cost_context,
+                    )
+                    if receipt.get("success"):
+                        self._completed = True
+                    else:
+                        self._cancel_verified_payment(
+                            RuntimeError(
+                                "batch streaming settlement failed: "
+                                f"{receipt.get('error', 'unknown error')}"
+                            )
+                        )
+                    if self._receipt_encoder is not None:
+                        receipt_frame = self._receipt_encoder(
+                            receipt, self._streaming_cost_context
+                        )
+                        if receipt_frame:
+                            yield receipt_frame
+                    continue
+
+                self._captured.append(chunk)
+                if is_opaque_stream:
+                    # OHTTP bytes are opaque and may coincidentally contain
+                    # SSE delimiters. Forward them immediately and unchanged.
+                    yield chunk
+                    continue
+                self._buffer += chunk
+
+                while b"\n\n" in self._buffer:
+                    event, self._buffer = self._buffer.split(b"\n\n", 1)
+                    event_bytes = event + b"\n\n"
+                    if _is_sse_done_event(event_bytes):
+                        self._done_event = event_bytes
+                        self._saw_done_event = True
+                        continue
+                    yield event_bytes
+
+            if self._buffer:
+                if _is_sse_done_event(self._buffer):
+                    self._done_event = (
+                        self._buffer
+                        if self._buffer.endswith(b"\n\n")
+                        else self._buffer + b"\n\n"
+                    )
+                    self._saw_done_event = True
+                else:
+                    yield self._buffer
+                self._buffer = b""
+
+            if is_opaque_stream:
+                if not self._completed:
+                    self._cancel_verified_payment(
+                        RuntimeError("stream missing settlement boundary")
+                    )
+                return
+
+            # SSE has no private boundary: its final settlement event is part
+            # of the public stream and is emitted immediately before [DONE].
+            if self._completed:
+                return
+            if not self._saw_done_event:
+                self._cancel_verified_payment(RuntimeError("stream ended without [DONE]"))
+                return
+            receipt = self._middleware._complete_batch_streaming_settlement(
+                payment_payload=self._payment_payload,
+                payment_requirements=self._payment_requirements,
+                declared_extensions=self._declared_extensions,
+                context=self._context,
+                transport_context=self._transport_context,
+                request_body_bytes=self._request_body_bytes,
+                response_body_bytes=b"".join(self._captured),
+                response_headers=dict(self._status_capture.headers),
+                requested_settlement_type=self._requested_settlement_type,
+                streaming_cost_context=self._streaming_cost_context,
+            )
+            if receipt.get("success"):
+                self._completed = True
+            else:
+                self._cancel_verified_payment(
+                    RuntimeError(
+                        "batch streaming settlement failed: "
+                        f"{receipt.get('error', 'unknown error')}"
+                    )
+                )
+            yield _encode_sse_event("x402-settlement", receipt)
+            yield self._done_event
+        finally:
+            if not self._completed:
+                self._cancel_verified_payment(RuntimeError("stream interrupted"))
+            if hasattr(self._upstream, "close"):
+                self._upstream.close()
+
+    def close(self) -> None:
+        if hasattr(self._upstream, "close"):
+            self._upstream.close()
+        if not self._completed:
+            self._cancel_verified_payment(RuntimeError("stream closed before settlement"))
+
+
 # ============================================================================
 # Flask Middleware Class
 # ============================================================================
@@ -281,6 +609,10 @@ class PaymentMiddleware:
         paywall_config: PaywallConfig | None = None,
         paywall_provider: PaywallProvider | None = None,
         sync_facilitator_on_start: bool = True,
+        streaming_cost_calculator: StreamingCostCalculator | None = None,
+        settlement_data_enabled: bool = False,
+        streaming_settlement_boundary: bytes | None = None,
+        streaming_receipt_encoder: StreamingReceiptEncoder | None = None,
     ) -> None:
         """Initialize Flask payment middleware.
 
@@ -298,18 +630,257 @@ class PaymentMiddleware:
             _validate_bazaar_extensions(routes)
 
         self._app = app
+        self._resource_server = server
         self._http_server = x402HTTPResourceServerSync(server, routes)
         self._paywall_config = paywall_config
         self._sync_on_start = sync_facilitator_on_start
         self._init_done = False
         self._init_lock = threading.Lock()
         self._original_wsgi = app.wsgi_app
+        self._streaming_cost_calculator = streaming_cost_calculator
+        self._settlement_data_enabled = settlement_data_enabled
+        self._streaming_settlement_boundary = streaming_settlement_boundary
+        self._streaming_receipt_encoder = streaming_receipt_encoder
 
         if paywall_provider:
             self._http_server.register_paywall_provider(paywall_provider)
 
         # Replace WSGI app
         app.wsgi_app = self._wsgi_middleware  # type: ignore
+
+    def _is_dynamic_batch_payment(
+        self,
+        payment_payload: Any,
+        payment_requirements: Any,
+    ) -> bool:
+        """Return whether this batch payment needs a post-response cost."""
+        if self._streaming_cost_calculator is None:
+            return False
+        if getattr(payment_requirements, "scheme", None) != "batch-settlement":
+            return False
+        payload = getattr(payment_payload, "payload", None)
+        return isinstance(payload, dict) and payload.get("type") in {"voucher", "deposit"}
+
+    def _is_streamable_dynamic_batch_payment(
+        self,
+        payment_payload: Any,
+        payment_requirements: Any,
+        status_capture: StatusCapture,
+    ) -> bool:
+        if not self._is_dynamic_batch_payment(payment_payload, payment_requirements):
+            return False
+        if not 200 <= status_capture.status_code < 300:
+            return False
+        is_sse = any(
+            name.lower() == "content-type" and "text/event-stream" in value.lower()
+            for name, value in status_capture.headers
+        )
+        is_opaque_stream = (
+            self._streaming_settlement_boundary is not None
+            and self._streaming_receipt_encoder is not None
+            and any(
+                name.lower() == "content-type"
+                and "message/ohttp-chunked-res" in value.lower()
+                for name, value in status_capture.headers
+            )
+        )
+        return is_sse or is_opaque_stream
+
+    def _calculate_dynamic_batch_charge(
+        self,
+        *,
+        context: HTTPRequestContext,
+        payment_payload: Any,
+        payment_requirements: Any,
+        request_body_bytes: bytes,
+        response_body_bytes: bytes,
+        streaming_cost_context: dict[str, Any] | None,
+        is_streaming: bool,
+    ) -> tuple[str, Any]:
+        """Calculate the server-owned charge after a batch response completes."""
+        output_object = _parse_sse_final_json(response_body_bytes)
+        if not is_streaming:
+            output_object = _parse_json_bytes(response_body_bytes) or output_object
+        if streaming_cost_context is not None:
+            inner_response = streaming_cost_context.get("inner_response_json")
+            if isinstance(inner_response, dict):
+                output_object = inner_response
+        cost_context = {
+            "method": context.method,
+            "path": context.path,
+            "request_body_bytes": request_body_bytes,
+            "request_json": _parse_json_bytes(request_body_bytes),
+            "payment_payload": payment_payload,
+            "payment_requirements": payment_requirements,
+            "response_body_bytes": response_body_bytes,
+            "response_json": output_object,
+            "response_object": output_object,
+            "is_streaming": is_streaming,
+        }
+        if streaming_cost_context is not None:
+            cost_context.update(streaming_cost_context)
+        assert self._streaming_cost_calculator is not None
+        return str(self._streaming_cost_calculator(cost_context)), output_object
+
+    def _build_settlement_metadata(
+        self,
+        *,
+        request_body_bytes: bytes,
+        response_body_bytes: bytes,
+        payment_payload: Any,
+        requested_settlement_type: str | None = None,
+        output_object: Any | None = None,
+    ) -> tuple[str, str | None]:
+        """Build the legacy TEE settlement-data payload without changing its shape."""
+        if requested_settlement_type == "private":
+            return "private", None
+
+        if output_object is None:
+            output_object = _parse_json_bytes(response_body_bytes)
+
+        response = output_object if isinstance(output_object, dict) else {}
+        tee_signature = response.get("tee_signature")
+        tee_id = response.get("tee_id")
+        tee_timestamp = response.get("tee_timestamp")
+        input_hash = response.get("tee_request_hash") or _sha256_bytes32(request_body_bytes)
+        output_hash = response.get("tee_output_hash") or _sha256_bytes32(response_body_bytes)
+
+        if not tee_id:
+            tee_id = "0xddc21f2d5d0af861b4fc1390df47f1c93bc5aee54e7e31763e97256d56148253"
+        if not tee_signature:
+            if requested_settlement_type == "individual":
+                return "private", None
+            logger.warning(
+                "TEE signature missing in response; using placeholder "
+                "tee_signature=0x for batch settlement"
+            )
+            tee_signature = "0x"
+
+        tee_id = str(tee_id)
+        if not tee_id.startswith("0x"):
+            tee_id = f"0x{tee_id}"
+
+        batch_payload: dict[str, Any] = {
+            "tee_id": tee_id,
+            "input_hash": input_hash,
+            "output_hash": output_hash,
+            "tee_signature": tee_signature,
+            "tee_timestamp": tee_timestamp,
+            "timestamp": tee_timestamp,
+        }
+        if requested_settlement_type in (None, "batch"):
+            return "batch", _encode_settlement_data(batch_payload)
+
+        if requested_settlement_type == "individual":
+            eth_address = _extract_eth_address_from_payment_payload(payment_payload)
+            if not eth_address or not tee_timestamp:
+                logger.warning(
+                    "Requested x-settlement-type=individual but eth_address or "
+                    "tee_timestamp missing; falling back to batch"
+                )
+                return "batch", _encode_settlement_data(batch_payload)
+            request_object = _parse_json_bytes(request_body_bytes)
+            if request_object is None:
+                request_object = request_body_bytes.decode("utf-8", errors="replace")
+            individual_payload = {
+                **batch_payload,
+                "input": _to_serializable_body(request_object),
+                "output": _to_serializable_body(output_object),
+                "timestamp": str(tee_timestamp),
+                "eth_address": str(eth_address),
+            }
+            return "individual", _encode_settlement_data(individual_payload)
+
+        return "batch", _encode_settlement_data(batch_payload)
+
+    def _submit_settlement_data_in_background(
+        self,
+        payment_payload: Any,
+        payment_requirements: Any,
+        settlement_type: str,
+        settlement_data: str | None,
+    ) -> None:
+        if not self._settlement_data_enabled or settlement_type == "private" or not settlement_data:
+            return
+
+        def submit() -> None:
+            try:
+                self._resource_server.submit_settlement_data(
+                    payment_payload,
+                    payment_requirements,
+                    settlement_type,
+                    settlement_data,
+                )
+            except Exception:
+                logger.exception("Failed to submit settlement data to the facilitator")
+
+        threading.Thread(target=submit, daemon=True, name="x402-settlement-data").start()
+
+    def _complete_batch_streaming_settlement(
+        self,
+        *,
+        payment_payload: Any,
+        payment_requirements: Any,
+        declared_extensions: dict[str, Any] | None,
+        context: HTTPRequestContext,
+        transport_context: HTTPTransportContext,
+        request_body_bytes: bytes,
+        response_body_bytes: bytes,
+        response_headers: dict[str, str],
+        requested_settlement_type: str | None,
+        streaming_cost_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        try:
+            amount, output_object = self._calculate_dynamic_batch_charge(
+                context=context,
+                payment_payload=payment_payload,
+                payment_requirements=payment_requirements,
+                request_body_bytes=request_body_bytes,
+                response_body_bytes=response_body_bytes,
+                streaming_cost_context=streaming_cost_context,
+                is_streaming=True,
+            )
+            transport_context.response_body = output_object
+            transport_context.response_headers = response_headers
+            payload = getattr(payment_payload, "payload", None)
+            is_deposit = isinstance(payload, dict) and payload.get("type") == "deposit"
+            # A deposit funds the channel at its signed buffer amount; only the
+            # server's local claim ledger receives the dynamic inference cost.
+            # This private context value never becomes an HTTP header, voucher,
+            # facilitator payload, or on-chain contract argument.
+            if is_deposit:
+                setattr(transport_context, "_x402_batch_settlement_charge_amount", amount)
+            settle_result = self._http_server.process_settlement(
+                payment_payload,
+                payment_requirements,
+                context=context,
+                settlement_overrides=None if is_deposit else {"amount": amount},
+                declared_extensions=declared_extensions,
+                transport_context=transport_context,
+            )
+            if not settle_result.success:
+                return {"success": False, "error": settle_result.error_reason}
+
+            settlement_type, settlement_data = self._build_settlement_metadata(
+                request_body_bytes=request_body_bytes,
+                response_body_bytes=response_body_bytes,
+                payment_payload=payment_payload,
+                requested_settlement_type=requested_settlement_type,
+                output_object=output_object,
+            )
+            self._submit_settlement_data_in_background(
+                payment_payload,
+                payment_requirements,
+                settlement_type,
+                settlement_data,
+            )
+            return {
+                "success": True,
+                "paymentResponse": settle_result.headers.get(PAYMENT_RESPONSE_HEADER),
+            }
+        except Exception as error:
+            logger.exception("Failed to complete batch streaming settlement")
+            return {"success": False, "error": str(error)}
 
     def _wsgi_middleware(
         self,
@@ -394,12 +965,38 @@ class PaymentMiddleware:
                 dispatcher = result.cancellation_dispatcher
                 transport_context = HTTPTransportContext(request=context)
 
-                # Capture response
-                response_wrapper = ResponseWrapper(start_response)
+                request_body_bytes = _read_body_bytes(environ)
+                streaming_cost_context = environ.get("x402.cost_context")
+                if not isinstance(streaming_cost_context, dict):
+                    streaming_cost_context = {}
+                    environ["x402.cost_context"] = streaming_cost_context
+                response_wrapper = StatusCapture(start_response)
                 body_chunks: list[bytes] = []
 
                 try:
-                    for chunk in self._original_wsgi(environ, response_wrapper):
+                    upstream = self._original_wsgi(environ, response_wrapper)
+                    if self._is_streamable_dynamic_batch_payment(
+                        result.payment_payload,
+                        result.payment_requirements,
+                        response_wrapper,
+                    ):
+                        return BatchSettlementStreamingResponse(
+                            upstream,
+                            self,
+                            result.payment_payload,
+                            result.payment_requirements,
+                            result.declared_extensions,
+                            context,
+                            transport_context,
+                            request_body_bytes,
+                            response_wrapper,
+                            dispatcher,
+                            _normalize_settlement_type(adapter.get_header("x-settlement-type")),
+                            streaming_cost_context,
+                            self._streaming_settlement_boundary,
+                            self._streaming_receipt_encoder,
+                        )
+                    for chunk in upstream:
                         body_chunks.append(chunk)
                 except BaseException as error:
                     if dispatcher is not None:
@@ -434,6 +1031,32 @@ class PaymentMiddleware:
 
                     # Settle payment
                     try:
+                        if self._is_dynamic_batch_payment(
+                            result.payment_payload,
+                            result.payment_requirements,
+                        ):
+                            response_body_bytes = b"".join(
+                                response_wrapper._write_chunks + body_chunks
+                            )
+                            amount, output_object = self._calculate_dynamic_batch_charge(
+                                context=context,
+                                payment_payload=result.payment_payload,
+                                payment_requirements=result.payment_requirements,
+                                request_body_bytes=request_body_bytes,
+                                response_body_bytes=response_body_bytes,
+                                streaming_cost_context=streaming_cost_context,
+                                is_streaming=False,
+                            )
+                            transport_context.response_body = output_object
+                            payload = getattr(result.payment_payload, "payload", None)
+                            if isinstance(payload, dict) and payload.get("type") == "deposit":
+                                setattr(
+                                    transport_context,
+                                    "_x402_batch_settlement_charge_amount",
+                                    amount,
+                                )
+                            else:
+                                overrides = {**(overrides or {}), "amount": amount}
                         settle_result = self._http_server.process_settlement(
                             result.payment_payload,
                             result.payment_requirements,
@@ -447,6 +1070,28 @@ class PaymentMiddleware:
                             # Add settlement headers
                             for key, value in settle_result.headers.items():
                                 response_wrapper.add_header(key, value)
+                            if self._settlement_data_enabled:
+                                response_body_bytes = b"".join(
+                                    response_wrapper._write_chunks + body_chunks
+                                )
+                                output_object = _parse_json_bytes(response_body_bytes)
+                                if output_object is None:
+                                    output_object = _parse_sse_final_json(response_body_bytes)
+                                settlement_type, settlement_data = self._build_settlement_metadata(
+                                    request_body_bytes=request_body_bytes,
+                                    response_body_bytes=response_body_bytes,
+                                    payment_payload=result.payment_payload,
+                                    requested_settlement_type=_normalize_settlement_type(
+                                        adapter.get_header("x-settlement-type")
+                                    ),
+                                    output_object=output_object,
+                                )
+                                self._submit_settlement_data_in_background(
+                                    result.payment_payload,
+                                    result.payment_requirements,
+                                    settlement_type,
+                                    settlement_data,
+                                )
                         else:
                             # Settlement failed - use response from process_settlement
                             # (includes PAYMENT-RESPONSE header and empty body by default)
@@ -532,6 +1177,10 @@ def payment_middleware(
     paywall_config: PaywallConfig | None = None,
     paywall_provider: PaywallProvider | None = None,
     sync_facilitator_on_start: bool = True,
+    streaming_cost_calculator: StreamingCostCalculator | None = None,
+    settlement_data_enabled: bool = False,
+    streaming_settlement_boundary: bytes | None = None,
+    streaming_receipt_encoder: StreamingReceiptEncoder | None = None,
 ) -> PaymentMiddleware:
     """Create Flask payment middleware with pre-configured server.
 
@@ -542,12 +1191,25 @@ def payment_middleware(
         paywall_config: Optional paywall UI configuration.
         paywall_provider: Optional custom paywall provider.
         sync_facilitator_on_start: Fetch facilitator support on first request.
+        streaming_cost_calculator: Resolves actual cost after an SSE response so
+            voucher-only batch payments can stream live.
+        settlement_data_enabled: Submit legacy TEE metadata to ``/settle_data``
+            without delaying the user response.
 
     Returns:
         PaymentMiddleware instance.
     """
     return PaymentMiddleware(
-        app, routes, server, paywall_config, paywall_provider, sync_facilitator_on_start
+        app,
+        routes,
+        server,
+        paywall_config,
+        paywall_provider,
+        sync_facilitator_on_start,
+        streaming_cost_calculator,
+        settlement_data_enabled,
+        streaming_settlement_boundary,
+        streaming_receipt_encoder,
     )
 
 

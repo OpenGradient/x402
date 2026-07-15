@@ -96,6 +96,14 @@ class FacilitatorClient(Protocol):
         """Settle a payment."""
         ...
 
+    async def settle_data(
+        self,
+        settlement_type: str,
+        settlement_data: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Submit side-channel settlement metadata."""
+        ...
+
     def get_supported(self) -> SupportedResponse:
         """Get supported payment kinds (sync - used during initialization)."""
         ...
@@ -118,6 +126,14 @@ class FacilitatorClientSync(Protocol):
         requirements: PaymentRequirements | PaymentRequirementsV1,
     ) -> SettleResponse:
         """Settle a payment."""
+        ...
+
+    def settle_data(
+        self,
+        settlement_type: str,
+        settlement_data: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Submit side-channel settlement metadata."""
         ...
 
     def get_supported(self) -> SupportedResponse:
@@ -219,6 +235,18 @@ class HTTPFacilitatorClientBase:
         if self._auth_provider:
             auth = self._auth_provider.get_auth_headers()
             headers.update(auth.settle)
+        return headers
+
+    def _get_settle_data_headers(
+        self,
+        settlement_type: str,
+        settlement_data: str | None,
+    ) -> dict[str, str]:
+        """Build headers for the facilitator's settlement-data endpoint."""
+        headers = self._get_settle_headers()
+        headers["x-settlement-type"] = settlement_type
+        if settlement_data:
+            headers["x-settlement-data"] = settlement_data
         return headers
 
     def _get_supported_headers(self) -> dict[str, str]:

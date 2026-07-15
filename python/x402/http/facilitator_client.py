@@ -229,6 +229,24 @@ class HTTPFacilitatorClient(HTTPFacilitatorClientBase):
             requirements.model_dump(by_alias=True, exclude_none=True),
         )
 
+    async def settle_data(
+        self,
+        settlement_type: str,
+        settlement_data: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Submit side-channel settlement metadata to the facilitator."""
+        client = self._get_async_client()
+        response = await client.post(
+            f"{self._url}/settle_data",
+            headers=self._get_settle_data_headers(settlement_type, settlement_data),
+            json={},
+        )
+        if response.status_code not in (200, 202):
+            raise ValueError(
+                f"Facilitator settle_data failed ({response.status_code}): {response.text}"
+            )
+        return response.json() if response.content else None
+
     def get_supported(self) -> SupportedResponse:
         """Get supported payment kinds and extensions.
 
@@ -450,6 +468,24 @@ class HTTPFacilitatorClientSync(HTTPFacilitatorClientBase):
             payload.model_dump(by_alias=True, exclude_none=True),
             requirements.model_dump(by_alias=True, exclude_none=True),
         )
+
+    def settle_data(
+        self,
+        settlement_type: str,
+        settlement_data: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Submit side-channel settlement metadata to the facilitator."""
+        client = self._get_client()
+        response = client.post(
+            f"{self._url}/settle_data",
+            headers=self._get_settle_data_headers(settlement_type, settlement_data),
+            json={},
+        )
+        if response.status_code not in (200, 202):
+            raise ValueError(
+                f"Facilitator settle_data failed ({response.status_code}): {response.text}"
+            )
+        return response.json() if response.content else None
 
     def get_supported(self) -> SupportedResponse:
         """Get supported payment kinds and extensions.

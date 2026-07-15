@@ -558,6 +558,32 @@ class x402ResourceServerSync(x402ResourceServerBase):
                 self._run_enrich_hook_sync,
             )
 
+    def submit_settlement_data(
+        self,
+        payload: PaymentPayload | PaymentPayloadV1,
+        requirements: PaymentRequirements | PaymentRequirementsV1,
+        settlement_type: str,
+        settlement_data: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Submit service-specific settlement metadata without settling payment value."""
+        if not self._initialized:
+            raise RuntimeError("Server not initialized. Call initialize() first.")
+
+        target = self._facilitator_clients_map.get(payload.get_network(), {}).get(
+            payload.get_scheme()
+        )
+        if target is None:
+            raise ValueError(
+                f"No facilitator registered for {payload.get_scheme()} on {payload.get_network()}"
+            )
+
+        submit = getattr(target, "settle_data", None)
+        if not callable(submit):
+            raise TypeError(
+                f"{type(target).__name__} does not support side-channel settlement data"
+            )
+        return submit(settlement_type, settlement_data)
+
     def _dispatch_verified_payment_canceled_sync(
         self,
         payload: PaymentPayload | PaymentPayloadV1,
